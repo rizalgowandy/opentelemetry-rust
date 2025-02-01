@@ -1,114 +1,246 @@
 //! # OpenTelemetry Metrics API
 
-use std::borrow::Cow;
-use std::result;
-use std::sync::PoisonError;
-use thiserror::Error;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
-mod async_instrument;
-mod config;
-mod counter;
-mod descriptor;
-mod kind;
+mod instruments;
 mod meter;
-pub mod noop;
-mod number;
-mod observer;
-pub mod registry;
-pub mod sdk_api;
-mod sync_instrument;
-mod up_down_counter;
-mod value_recorder;
+pub(crate) mod noop;
 
-use crate::sdk::export::ExportError;
-pub use async_instrument::{AsyncRunner, BatchObserverResult, Observation, ObserverResult};
-pub use config::InstrumentConfig;
-pub use counter::{BoundCounter, Counter, CounterBuilder};
-pub use descriptor::Descriptor;
-pub use kind::InstrumentKind;
-pub use meter::{Meter, MeterProvider};
-pub use number::{AtomicNumber, Number, NumberKind};
-pub use observer::{
-    BatchObserver, SumObserver, SumObserverBuilder, UpDownSumObserver, UpDownSumObserverBuilder,
-    ValueObserver, ValueObserverBuilder,
+use crate::{Array, KeyValue, Value};
+pub use instruments::{
+    counter::{Counter, ObservableCounter},
+    gauge::{Gauge, ObservableGauge},
+    histogram::Histogram,
+    up_down_counter::{ObservableUpDownCounter, UpDownCounter},
+    AsyncInstrument, AsyncInstrumentBuilder, Callback, HistogramBuilder, InstrumentBuilder,
+    SyncInstrument,
 };
-pub use sync_instrument::Measurement;
-pub use up_down_counter::{BoundUpDownCounter, UpDownCounter, UpDownCounterBuilder};
-pub use value_recorder::{BoundValueRecorder, ValueRecorder, ValueRecorderBuilder};
+pub use meter::{Meter, MeterProvider};
 
-/// A specialized `Result` type for metric operations.
-pub type Result<T> = result::Result<T, MetricsError>;
+struct F64Hashable(f64);
 
-/// Errors returned by the metrics API.
-#[derive(Error, Debug)]
-#[non_exhaustive]
-pub enum MetricsError {
-    /// Other errors not covered by specific cases.
-    #[error("Metrics error: {0}")]
-    Other(String),
-    /// Errors when requesting quantiles out of the 0-1 range.
-    #[error("The requested quantile is out of range")]
-    InvalidQuantile,
-    /// Errors when recording nan values.
-    #[error("NaN value is an invalid input")]
-    NaNInput,
-    /// Errors when recording negative values in monotonic sums.
-    #[error("Negative value is out of range for this instrument")]
-    NegativeInput,
-    /// Errors when merging aggregators of incompatible types.
-    #[error("Inconsistent aggregator types: {0}")]
-    InconsistentAggregator(String),
-    /// Errors when requesting data when no data has been collected
-    #[error("No data collected by this aggregator")]
-    NoDataCollected,
-    /// Errors when registering to instruments with the same name and kind
-    #[error("A metric was already registered by this name with another kind or number type: {0}")]
-    MetricKindMismatch(String),
-    /// Errors when processor logic is incorrect
-    #[error("Inconsistent processor state")]
-    InconsistentState,
-    /// Errors when aggregator cannot subtract
-    #[error("Aggregator does not subtract")]
-    NoSubtraction,
-    /// Fail to export metrics
-    #[error("Metrics exporter {} failed with {0}", .0.exporter_name())]
-    ExportErr(Box<dyn ExportError>),
-}
-
-impl<T: ExportError> From<T> for MetricsError {
-    fn from(err: T) -> Self {
-        MetricsError::ExportErr(Box::new(err))
+impl PartialEq for F64Hashable {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
     }
 }
 
-impl<T> From<PoisonError<T>> for MetricsError {
-    fn from(err: PoisonError<T>) -> Self {
-        MetricsError::Other(err.to_string())
+impl Eq for F64Hashable {}
+
+impl Hash for F64Hashable {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
     }
 }
 
-/// Units denote underlying data units tracked by `Meter`s.
-#[derive(Clone, Default, Debug, PartialEq, Hash)]
-pub struct Unit(Cow<'static, str>);
-
-impl Unit {
-    /// Create a new `Unit` from an `Into<String>`
-    pub fn new<S>(value: S) -> Self
-    where
-        S: Into<Cow<'static, str>>,
-    {
-        Unit(value.into())
-    }
-
-    /// View unit as &str
-    pub fn as_str(&self) -> &str {
-        self.0.as_ref()
+impl Hash for KeyValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+        match &self.value {
+            Value::F64(f) => F64Hashable(*f).hash(state),
+            Value::Array(a) => match a {
+                Array::Bool(b) => b.hash(state),
+                Array::I64(i) => i.hash(state),
+                Array::F64(f) => f.iter().for_each(|f| F64Hashable(*f).hash(state)),
+                Array::String(s) => s.hash(state),
+            },
+            Value::Bool(b) => b.hash(state),
+            Value::I64(i) => i.hash(state),
+            Value::String(s) => s.hash(state),
+        };
     }
 }
 
-impl AsRef<str> for Unit {
-    #[inline]
-    fn as_ref(&self) -> &str {
-        self.0.as_ref()
+impl Eq for KeyValue {}
+
+/// SDK implemented trait for creating instruments
+pub trait InstrumentProvider {
+    /// creates an instrument for recording increasing values.
+    fn u64_counter(&self, _builder: InstrumentBuilder<'_, Counter<u64>>) -> Counter<u64> {
+        Counter::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording increasing values.
+    fn f64_counter(&self, _builder: InstrumentBuilder<'_, Counter<f64>>) -> Counter<f64> {
+        Counter::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording increasing values via callback.
+    fn u64_observable_counter(
+        &self,
+        _builder: AsyncInstrumentBuilder<'_, ObservableCounter<u64>, u64>,
+    ) -> ObservableCounter<u64> {
+        ObservableCounter::new()
+    }
+
+    /// creates an instrument for recording increasing values via callback.
+    fn f64_observable_counter(
+        &self,
+        _builder: AsyncInstrumentBuilder<'_, ObservableCounter<f64>, f64>,
+    ) -> ObservableCounter<f64> {
+        ObservableCounter::new()
+    }
+
+    /// creates an instrument for recording changes of a value.
+    fn i64_up_down_counter(
+        &self,
+        _builder: InstrumentBuilder<'_, UpDownCounter<i64>>,
+    ) -> UpDownCounter<i64> {
+        UpDownCounter::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording changes of a value.
+    fn f64_up_down_counter(
+        &self,
+        _builder: InstrumentBuilder<'_, UpDownCounter<f64>>,
+    ) -> UpDownCounter<f64> {
+        UpDownCounter::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording changes of a value.
+    fn i64_observable_up_down_counter(
+        &self,
+        _builder: AsyncInstrumentBuilder<'_, ObservableUpDownCounter<i64>, i64>,
+    ) -> ObservableUpDownCounter<i64> {
+        ObservableUpDownCounter::new()
+    }
+
+    /// creates an instrument for recording changes of a value via callback.
+    fn f64_observable_up_down_counter(
+        &self,
+        _builder: AsyncInstrumentBuilder<'_, ObservableUpDownCounter<f64>, f64>,
+    ) -> ObservableUpDownCounter<f64> {
+        ObservableUpDownCounter::new()
+    }
+
+    /// creates an instrument for recording independent values.
+    fn u64_gauge(&self, _builder: InstrumentBuilder<'_, Gauge<u64>>) -> Gauge<u64> {
+        Gauge::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording independent values.
+    fn f64_gauge(&self, _builder: InstrumentBuilder<'_, Gauge<f64>>) -> Gauge<f64> {
+        Gauge::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording independent values.
+    fn i64_gauge(&self, _builder: InstrumentBuilder<'_, Gauge<i64>>) -> Gauge<i64> {
+        Gauge::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording the current value via callback.
+    fn u64_observable_gauge(
+        &self,
+        _builder: AsyncInstrumentBuilder<'_, ObservableGauge<u64>, u64>,
+    ) -> ObservableGauge<u64> {
+        ObservableGauge::new()
+    }
+
+    /// creates an instrument for recording the current value via callback.
+    fn i64_observable_gauge(
+        &self,
+        _builder: AsyncInstrumentBuilder<'_, ObservableGauge<i64>, i64>,
+    ) -> ObservableGauge<i64> {
+        ObservableGauge::new()
+    }
+
+    /// creates an instrument for recording the current value via callback.
+    fn f64_observable_gauge(
+        &self,
+        _builder: AsyncInstrumentBuilder<'_, ObservableGauge<f64>, f64>,
+    ) -> ObservableGauge<f64> {
+        ObservableGauge::new()
+    }
+
+    /// creates an instrument for recording a distribution of values.
+    fn f64_histogram(&self, _builder: HistogramBuilder<'_, Histogram<f64>>) -> Histogram<f64> {
+        Histogram::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+
+    /// creates an instrument for recording a distribution of values.
+    fn u64_histogram(&self, _builder: HistogramBuilder<'_, Histogram<u64>>) -> Histogram<u64> {
+        Histogram::new(Arc::new(noop::NoopSyncInstrument::new()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::Rng;
+
+    use crate::KeyValue;
+    use std::collections::hash_map::DefaultHasher;
+    use std::f64;
+    use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn kv_float_equality() {
+        let kv1 = KeyValue::new("key", 1.0);
+        let kv2 = KeyValue::new("key", 1.0);
+        assert_eq!(kv1, kv2);
+
+        let kv1 = KeyValue::new("key", 1.0);
+        let kv2 = KeyValue::new("key", 1.01);
+        assert_ne!(kv1, kv2);
+
+        let kv1 = KeyValue::new("key", f64::NAN);
+        let kv2 = KeyValue::new("key", f64::NAN);
+        assert_ne!(kv1, kv2, "NAN is not equal to itself");
+
+        for float_val in [
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+        ]
+        .iter()
+        {
+            let kv1 = KeyValue::new("key", *float_val);
+            let kv2 = KeyValue::new("key", *float_val);
+            assert_eq!(kv1, kv2);
+        }
+
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..100 {
+            let random_value = rng.gen::<f64>();
+            let kv1 = KeyValue::new("key", random_value);
+            let kv2 = KeyValue::new("key", random_value);
+            assert_eq!(kv1, kv2);
+        }
+    }
+
+    #[test]
+    fn kv_float_hash() {
+        for float_val in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+        ]
+        .iter()
+        {
+            let kv1 = KeyValue::new("key", *float_val);
+            let kv2 = KeyValue::new("key", *float_val);
+            assert_eq!(hash_helper(&kv1), hash_helper(&kv2));
+        }
+
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..100 {
+            let random_value = rng.gen::<f64>();
+            let kv1 = KeyValue::new("key", random_value);
+            let kv2 = KeyValue::new("key", random_value);
+            assert_eq!(hash_helper(&kv1), hash_helper(&kv2));
+        }
+    }
+
+    fn hash_helper<T: Hash>(item: &T) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        item.hash(&mut hasher);
+        hasher.finish()
     }
 }

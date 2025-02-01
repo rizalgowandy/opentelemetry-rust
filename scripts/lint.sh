@@ -10,28 +10,47 @@ cargo_feature() {
 }
 
 if rustup component add clippy; then
-  cargo clippy --all-targets --all-features -- \
-    `# Exit with a nonzero code if there are clippy warnings` \
-    -Dwarnings
+ crates=( "opentelemetry"
+                "opentelemetry-http"
+                "opentelemetry-jaeger-propagator"
+                "opentelemetry-appender-log"
+                "opentelemetry-appender-tracing"
+                "opentelemetry-otlp"
+                "opentelemetry-prometheus"
+                "opentelemetry-proto"
+                "opentelemetry-sdk"
+                "opentelemetry-semantic-conventions"
+                "opentelemetry-stdout"
+                "opentelemetry-zipkin")
+  for crate in "${crates[@]}"; do
+      cargo clippy --manifest-path=$crate/Cargo.toml --all-targets --all-features -- \
+          `# Exit with a nonzero code if there are clippy warnings` \
+          -Dwarnings
+  done
 
-  cargo_feature opentelemetry "trace,rt-tokio,rt-tokio-current-thread,rt-async-std,testing"
+  cargo_feature opentelemetry "trace,metrics,logs,spec_unstable_logs_enabled,testing"
 
   cargo_feature opentelemetry-otlp "default"
   cargo_feature opentelemetry-otlp "default,tls"
   cargo_feature opentelemetry-otlp "default,tls-roots"
-  cargo_feature opentelemetry-otlp "trace,grpc-sys"
-  cargo_feature opentelemetry-otlp "trace,grpc-sys,openssl"
-  cargo_feature opentelemetry-otlp "trace,grpc-sys,openssl-vendored"
   cargo_feature opentelemetry-otlp "http-proto"
   cargo_feature opentelemetry-otlp "http-proto, reqwest-blocking-client"
   cargo_feature opentelemetry-otlp "http-proto, reqwest-client"
   cargo_feature opentelemetry-otlp "http-proto, reqwest-rustls"
-  cargo_feature opentelemetry-otlp "http-proto, surf-client, surf/curl-client"
+  cargo_feature opentelemetry-otlp "metrics"
 
-  cargo_feature opentelemetry-jaeger "surf_collector_client, surf/curl-client"
-  cargo_feature opentelemetry-jaeger "isahc_collector_client"
-  cargo_feature opentelemetry-jaeger "reqwest_blocking_collector_client"
-  cargo_feature opentelemetry-jaeger "reqwest_collector_client"
-  cargo_feature opentelemetry-jaeger "collector_client"
+  cargo_feature opentelemetry-jaeger-propagator "default"
+
+  cargo_feature opentelemetry-proto "default"
+  cargo_feature opentelemetry-proto "full"
+  cargo_feature opentelemetry-proto "gen-tonic,trace"
+  cargo_feature opentelemetry-proto "gen-tonic,trace,with-serde"
+  cargo_feature opentelemetry-proto "gen-tonic,trace,with-schemars,with-serde"
+  cargo_feature opentelemetry-proto "gen-tonic,metrics"
+  cargo_feature opentelemetry-proto "gen-tonic,metrics,with-serde"
+  cargo_feature opentelemetry-proto "gen-tonic,metrics,with-schemars,with-serde"
+  cargo_feature opentelemetry-proto "gen-tonic,logs"
+  cargo_feature opentelemetry-proto "gen-tonic,logs,with-serde"
+  cargo_feature opentelemetry-proto "gen-tonic,logs,with-schemars,with-serde"
 
 fi

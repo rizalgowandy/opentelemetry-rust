@@ -1,32 +1,11 @@
 use crate::{
-    sdk,
-    trace::{Event, Link, Span, SpanId, SpanKind, StatusCode, TraceContextExt, TraceId},
+    trace::{Event, Link, Span, SpanId, SpanKind, Status, TraceContextExt, TraceId, TraceState},
     Context, KeyValue,
 };
 use std::borrow::Cow;
 use std::time::SystemTime;
 
-/// Interface for constructing `Span`s.
-///
-/// The OpenTelemetry library achieves in-process context propagation of `Span`s
-/// by way of the `Tracer`.
-///
-/// The `Tracer` is responsible for tracking the currently active `Span`, and
-/// exposes methods for creating and activating new `Spans`. The `Tracer` is
-/// configured with `Propagators` which support transferring span context across
-/// process boundaries.
-///
-/// `Tracer`s are generally expected to be used as singletons. Implementations
-/// SHOULD provide a single global default Tracer.
-///
-/// Some applications may require multiple `Tracer` instances, e.g. to create
-/// `Span`s on behalf of other applications. Implementations MAY provide a
-/// global registry of Tracers for such applications.
-///
-/// The `Tracer` SHOULD allow end users to configure other tracing components
-/// that control how `Span`s are passed across process boundaries, including the
-/// binary and text format `Propagator`s used to serialize `Span`s created by
-/// the `Tracer`.
+/// The interface for constructing [`Span`]s.
 ///
 /// ## In Synchronous Code
 ///
@@ -39,12 +18,12 @@ use std::time::SystemTime;
 ///
 /// let parent = tracer.start("foo");
 /// let parent_cx = Context::current_with_span(parent);
-/// let mut child = tracer.span_builder("bar").start_with_context(&tracer, &parent_cx);
+/// let mut child = tracer.start_with_context("bar", &parent_cx);
 ///
 /// // ...
 ///
-/// child.end();
-/// drop(parent_cx) // end parent
+/// child.end(); // explicitly end
+/// drop(parent_cx) // or implicitly end on drop
 /// ```
 ///
 /// Spans can also use the current thread's [`Context`] to track which span is active:
@@ -58,20 +37,6 @@ use std::time::SystemTime;
 /// tracer.in_span("foo", |_foo_cx| {
 ///     // parent span is active
 ///     tracer.in_span("bar", |_bar_cx| {
-///         // child span is now the active span and associated with the parent span
-///     });
-///     // child has ended, parent now the active span again
-/// });
-/// // parent has ended, no active spans
-///
-/// // -- OR --
-///
-/// // create complex spans with span builder and `with_span`
-/// let parent_span = tracer.span_builder("foo").with_kind(SpanKind::Server).start(&tracer);
-/// tracer.with_span(parent_span, |_foo_cx| {
-///     // parent span is active
-///     let child_span = tracer.span_builder("bar").with_kind(SpanKind::Client).start(&tracer);
-///     tracer.with_span(child_span, |_bar_cx| {
 ///         // child span is now the active span and associated with the parent span
 ///     });
 ///     // child has ended, parent now the active span again
@@ -154,86 +119,66 @@ use std::time::SystemTime;
 /// [`Future::with_context`]: crate::trace::FutureExt::with_context()
 /// [`Context`]: crate::Context
 pub trait Tracer {
-    /// The `Span` type used by this `Tracer`.
+    /// The [`Span`] type used by this tracer.
     type Span: Span;
 
-    /// Starts a new `Span`.
+    /// Starts a new [`Span`].
     ///
-    /// By default the currently active `Span` is set as the new `Span`'s
-    /// parent. The `Tracer` MAY provide other default options for newly
-    /// created `Span`s.
+    /// By default the currently active `Span` is set as the new `Span`'s parent.
     ///
-    /// `Span` creation MUST NOT set the newly created `Span` as the currently
-    /// active `Span` by default, but this functionality MAY be offered additionally
-    /// as a separate operation.
-    ///
-    /// Each span has zero or one parent spans and zero or more child spans, which
+    /// Each span has zero or one parent span and zero or more child spans, which
     /// represent causally related operations. A tree of related spans comprises a
-    /// trace. A span is said to be a _root span_ if it does not have a parent. Each
+    /// trace. A span is said to be a root span if it does not have a parent. Each
     /// trace includes a single root span, which is the shared ancestor of all other
-    /// spans in the trace. Implementations MUST provide an option to create a `Span` as
-    /// a root span, and MUST generate a new `TraceId` for each root span created.
-    /// For a Span with a parent, the `TraceId` MUST be the same as the parent.
-    /// Also, the child span MUST inherit all `TraceState` values of its parent by default.
-    ///
-    /// A `Span` is said to have a _remote parent_ if it is the child of a `Span`
-    /// created in another process. Each propagators' deserialization must set
-    /// `is_remote` to true on a parent `SpanContext` so `Span` creation knows if the
-    /// parent is remote.
+    /// spans in the trace.
     fn start<T>(&self, name: T) -> Self::Span
     where
         T: Into<Cow<'static, str>>,
     {
-        self.start_with_context(name, &Context::current())
+        Context::map_current(|cx| self.start_with_context(name, cx))
     }
 
-    /// Starts a new `Span` with a given context
+    /// Starts a new [`Span`] with a given context.
     ///
-    /// By default the currently active `Span` is set as the new `Span`'s
-    /// parent. The `Tracer` MAY provide other default options for newly
-    /// created `Span`s.
+    /// If this context contains a span, the newly created span will be a child of
+    /// that span.
     ///
-    /// `Span` creation MUST NOT set the newly created `Span` as the currently
-    /// active `Span` by default, but this functionality MAY be offered additionally
-    /// as a separate operation.
-    ///
-    /// Each span has zero or one parent spans and zero or more child spans, which
+    /// Each span has zero or one parent span and zero or more child spans, which
     /// represent causally related operations. A tree of related spans comprises a
-    /// trace. A span is said to be a _root span_ if it does not have a parent. Each
+    /// trace. A span is said to be a root span if it does not have a parent. Each
     /// trace includes a single root span, which is the shared ancestor of all other
-    /// spans in the trace. Implementations MUST provide an option to create a `Span` as
-    /// a root span, and MUST generate a new `TraceId` for each root span created.
-    /// For a Span with a parent, the `TraceId` MUST be the same as the parent.
-    /// Also, the child span MUST inherit all `TraceState` values of its parent by default.
-    ///
-    /// A `Span` is said to have a _remote parent_ if it is the child of a `Span`
-    /// created in another process. Each propagators' deserialization must set
-    /// `is_remote` to true on a parent `SpanContext` so `Span` creation knows if the
-    /// parent is remote.
+    /// spans in the trace.
     fn start_with_context<T>(&self, name: T, parent_cx: &Context) -> Self::Span
     where
-        T: Into<Cow<'static, str>>;
-
-    /// Creates a span builder
-    ///
-    /// An ergonomic way for attributes to be configured before the `Span` is started.
-    fn span_builder<T>(&self, name: T) -> SpanBuilder
-    where
-        T: Into<Cow<'static, str>>;
-
-    /// Create a span from a [SpanBuilder]
-    fn build(&self, builder: SpanBuilder) -> Self::Span {
-        self.build_with_context(builder, &Context::current())
+        T: Into<Cow<'static, str>>,
+    {
+        self.build_with_context(SpanBuilder::from_name(name), parent_cx)
     }
 
-    /// Create a span from a [SpanBuilder] with a parent context.
+    /// Creates a span builder.
+    ///
+    /// [`SpanBuilder`]s allow you to specify all attributes of a [`Span`] before
+    /// the span is started.
+    fn span_builder<T>(&self, name: T) -> SpanBuilder
+    where
+        T: Into<Cow<'static, str>>,
+    {
+        SpanBuilder::from_name(name)
+    }
+
+    /// Start a [`Span`] from a [`SpanBuilder`].
+    fn build(&self, builder: SpanBuilder) -> Self::Span {
+        Context::map_current(|cx| self.build_with_context(builder, cx))
+    }
+
+    /// Start a span from a [`SpanBuilder`] with a parent context.
     fn build_with_context(&self, builder: SpanBuilder, parent_cx: &Context) -> Self::Span;
 
-    /// Start a new span and execute the given closure with reference to the span's
-    /// context.
+    /// Start a new span and execute the given closure with reference to the context
+    /// in which the span is active.
     ///
     /// This method starts a new span and sets it as the active span for the given
-    /// function. It then executes the body. It closes the span before returning the
+    /// function. It then executes the body. It ends the span before returning the
     /// execution result.
     ///
     /// # Examples
@@ -256,52 +201,13 @@ pub trait Tracer {
     ///     })
     /// }
     /// ```
-    fn in_span<T, F>(&self, name: &'static str, f: F) -> T
+    fn in_span<T, F, N>(&self, name: N, f: F) -> T
     where
         F: FnOnce(Context) -> T,
+        N: Into<Cow<'static, str>>,
         Self::Span: Send + Sync + 'static,
     {
         let span = self.start(name);
-        let cx = Context::current_with_span(span);
-        let _guard = cx.clone().attach();
-        f(cx)
-    }
-
-    /// Start a new span and execute the given closure with reference to the span's
-    /// context.
-    ///
-    /// This method starts a new span and sets it as the active span for the given
-    /// function. It then executes the body. It closes the span before returning the
-    /// execution result.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use opentelemetry::{global, trace::{Span, SpanKind, Tracer, get_active_span}, KeyValue};
-    ///
-    /// fn my_function() {
-    ///     let tracer = global::tracer("my-component");
-    ///     // start a span with custom attributes via span builder
-    ///     let span = tracer.span_builder("span-name").with_kind(SpanKind::Server).start(&tracer);
-    ///     // Mark the span as active for the duration of the closure
-    ///     global::tracer("my-component").with_span(span, |_cx| {
-    ///         // anything happening in functions we call can still access the active span...
-    ///         my_other_function();
-    ///     })
-    /// }
-    ///
-    /// fn my_other_function() {
-    ///     // call methods on the current span from
-    ///     get_active_span(|span| {
-    ///         span.add_event("An event!".to_string(), vec![KeyValue::new("happened", true)]);
-    ///     })
-    /// }
-    /// ```
-    fn with_span<T, F>(&self, span: Self::Span, f: F) -> T
-    where
-        F: FnOnce(Context) -> T,
-        Self::Span: Send + Sync + 'static,
-    {
         let cx = Context::current_with_span(span);
         let _guard = cx.clone().attach();
         f(cx)
@@ -336,28 +242,39 @@ pub trait Tracer {
 pub struct SpanBuilder {
     /// Trace id, useful for integrations with external tracing systems.
     pub trace_id: Option<TraceId>,
+
     /// Span id, useful for integrations with external tracing systems.
     pub span_id: Option<SpanId>,
+
     /// Span kind
     pub span_kind: Option<SpanKind>,
+
     /// Span name
     pub name: Cow<'static, str>,
+
     /// Span start time
     pub start_time: Option<SystemTime>,
+
     /// Span end time
     pub end_time: Option<SystemTime>,
-    /// Span attributes
+
+    /// Span attributes that are provided at the span creation time.
+    /// More attributes can be added afterwards.
+    /// Providing duplicate keys will result in multiple attributes
+    /// with the same key, as there is no de-duplication performed.
     pub attributes: Option<Vec<KeyValue>>,
+
     /// Span events
     pub events: Option<Vec<Event>>,
+
     /// Span Links
     pub links: Option<Vec<Link>>,
-    /// Span status code
-    pub status_code: Option<StatusCode>,
-    /// Span status message
-    pub status_message: Option<Cow<'static, str>>,
+
+    /// Span status
+    pub status: Status,
+
     /// Sampling result
-    pub sampling_result: Option<sdk::trace::SamplingResult>,
+    pub sampling_result: Option<SamplingResult>,
 }
 
 /// SpanBuilder methods
@@ -410,10 +327,15 @@ impl SpanBuilder {
         }
     }
 
-    /// Assign span attributes
-    pub fn with_attributes(self, attributes: Vec<KeyValue>) -> Self {
+    /// Assign span attributes from an iterable.
+    /// Providing duplicate keys will result in multiple attributes
+    /// with the same key, as there is no de-duplication performed.    
+    pub fn with_attributes<I>(self, attributes: I) -> Self
+    where
+        I: IntoIterator<Item = KeyValue>,
+    {
         SpanBuilder {
-            attributes: Some(attributes),
+            attributes: Some(attributes.into_iter().collect()),
             ..self
         }
     }
@@ -428,7 +350,7 @@ impl SpanBuilder {
 
     /// Assign links
     pub fn with_links(self, mut links: Vec<Link>) -> Self {
-        links.retain(|l| l.span_context().is_valid());
+        links.retain(|l| l.span_context.is_valid());
         SpanBuilder {
             links: Some(links),
             ..self
@@ -436,23 +358,12 @@ impl SpanBuilder {
     }
 
     /// Assign status code
-    pub fn with_status_code(self, code: StatusCode) -> Self {
-        SpanBuilder {
-            status_code: Some(code),
-            ..self
-        }
-    }
-
-    /// Assign status message
-    pub fn with_status_message<T: Into<Cow<'static, str>>>(self, message: T) -> Self {
-        SpanBuilder {
-            status_message: Some(message.into()),
-            ..self
-        }
+    pub fn with_status(self, status: Status) -> Self {
+        SpanBuilder { status, ..self }
     }
 
     /// Assign sampling result
-    pub fn with_sampling_result(self, sampling_result: sdk::trace::SamplingResult) -> Self {
+    pub fn with_sampling_result(self, sampling_result: SamplingResult) -> Self {
         SpanBuilder {
             sampling_result: Some(sampling_result),
             ..self
@@ -461,11 +372,37 @@ impl SpanBuilder {
 
     /// Builds a span with the given tracer from this configuration.
     pub fn start<T: Tracer>(self, tracer: &T) -> T::Span {
-        tracer.build_with_context(self, &Context::current())
+        Context::map_current(|cx| tracer.build_with_context(self, cx))
     }
 
     /// Builds a span with the given tracer from this configuration and parent.
     pub fn start_with_context<T: Tracer>(self, tracer: &T, parent_cx: &Context) -> T::Span {
         tracer.build_with_context(self, parent_cx)
     }
+}
+
+/// The result of sampling logic for a given span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SamplingResult {
+    /// The decision about whether or not to sample.
+    pub decision: SamplingDecision,
+
+    /// Extra attributes to be added to the span by the sampler
+    pub attributes: Vec<KeyValue>,
+
+    /// Trace state from parent context, may be modified by samplers.
+    pub trace_state: TraceState,
+}
+
+/// Decision about whether or not to sample
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SamplingDecision {
+    /// Span will not be recorded and all events and attributes will be dropped.
+    Drop,
+
+    /// Span data wil be recorded, but not exported.
+    RecordOnly,
+
+    /// Span data will be recorded and exported.
+    RecordAndSample,
 }

@@ -1,69 +1,83 @@
 use hello_world::greeter_client::GreeterClient;
 use hello_world::HelloRequest;
-use opentelemetry::sdk::propagation::TraceContextPropagator;
 use opentelemetry::{global, propagation::Injector};
-use tracing::*;
-use tracing_futures::Instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
-use tracing_subscriber::prelude::*;
+use opentelemetry_sdk::{propagation::TraceContextPropagator, trace as sdktrace};
+use opentelemetry_stdout::SpanExporter;
+
+use opentelemetry::{
+    trace::{SpanKind, TraceContextExt, Tracer},
+    Context, KeyValue,
+};
+
+fn init_tracer() -> sdktrace::TracerProvider {
+    global::set_text_map_propagator(TraceContextPropagator::new());
+    // Install stdout exporter pipeline to be able to retrieve the collected spans.
+    let provider = sdktrace::TracerProvider::builder()
+        .with_batch_exporter(SpanExporter::default())
+        .build();
+
+    global::set_tracer_provider(provider.clone());
+    provider
+}
 
 struct MetadataMap<'a>(&'a mut tonic::metadata::MetadataMap);
 
-impl<'a> Injector for MetadataMap<'a> {
+impl Injector for MetadataMap<'_> {
     /// Set a key and value in the MetadataMap.  Does nothing if the key or value are not valid inputs
     fn set(&mut self, key: &str, value: String) {
         if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes()) {
-            if let Ok(val) = tonic::metadata::MetadataValue::from_str(&value) {
+            if let Ok(val) = tonic::metadata::MetadataValue::try_from(&value) {
                 self.0.insert(key, val);
             }
         }
     }
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)] // tonic don't derive Eq for generated types. We shouldn't manually change it.
 pub mod hello_world {
     tonic::include_proto!("helloworld");
 }
 
-#[instrument]
 async fn greet() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
-    let mut client = GreeterClient::connect("http://[::1]:50051")
-        .instrument(info_span!("client connect"))
-        .await?;
+    let tracer = global::tracer("example/client");
+    let span = tracer
+        .span_builder("Greeter/client")
+        .with_kind(SpanKind::Client)
+        .with_attributes([KeyValue::new("component", "grpc")])
+        .start(&tracer);
+    let cx = Context::current_with_span(span);
+    let mut client = GreeterClient::connect("http://[::1]:50051").await?;
 
     let mut request = tonic::Request::new(HelloRequest {
         name: "Tonic".into(),
     });
 
     global::get_text_map_propagator(|propagator| {
-        propagator.inject_context(
-            &tracing::Span::current().context(),
-            &mut MetadataMap(request.metadata_mut()),
-        )
+        propagator.inject_context(&cx, &mut MetadataMap(request.metadata_mut()))
     });
 
-    let response = client
-        .say_hello(request)
-        .instrument(info_span!("say_hello"))
-        .await?;
+    let response = client.say_hello(request).await;
 
-    info!("Response received: {:?}", response);
+    let status = match response {
+        Ok(_res) => "OK".to_string(),
+        Err(status) => {
+            // Access the status code
+            let status_code = status.code();
+            status_code.to_string()
+        }
+    };
+    cx.span()
+        .add_event("Got response!", vec![KeyValue::new("status", status)]);
+
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
-    global::set_text_map_propagator(TraceContextPropagator::new());
-    let tracer = opentelemetry_jaeger::new_pipeline()
-        .with_service_name("grpc-client")
-        .install_simple()?;
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new("INFO"))
-        .with(tracing_opentelemetry::layer().with_tracer(tracer))
-        .try_init()?;
-
+    let provider = init_tracer();
     greet().await?;
 
-    opentelemetry::global::shutdown_tracer_provider();
+    provider.shutdown()?;
 
     Ok(())
 }

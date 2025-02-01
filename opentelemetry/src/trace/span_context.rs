@@ -1,17 +1,4 @@
-//! # OpenTelemetry SpanContext interface
-//!
-//! A `SpanContext` represents the portion of a `Span` which must be serialized and propagated along
-//! side of a distributed context. `SpanContext`s are immutable.
-//!
-//! The OpenTelemetry `SpanContext` representation conforms to the [w3c TraceContext specification].
-//! It contains two identifiers - a `TraceId` and a `SpanId` - along with a set of common
-//! `TraceFlags` and system-specific `TraceState` values.
-//!
-//! The spec can be viewed here: <https://github.com/open-telemetry/opentelemetry-specification/blob/v1.3.0/specification/trace/api.md#spancontext>
-//!
-//! [w3c TraceContext specification]: https://www.w3.org/TR/trace-context/
-#[cfg(feature = "serialize")]
-use serde::{Deserialize, Serialize};
+use crate::trace::{TraceError, TraceResult};
 use std::collections::VecDeque;
 use std::fmt;
 use std::hash::Hash;
@@ -22,16 +9,25 @@ use thiserror::Error;
 
 /// Flags that can be set on a [`SpanContext`].
 ///
-/// The current version of the specification only supports a single flag called `sampled`.
+/// The current version of the specification only supports a single flag
+/// [`TraceFlags::SAMPLED`].
 ///
-/// See the W3C TraceContext specification's [trace-flags] section for more details.
+/// See the W3C TraceContext specification's [trace-flags] section for more
+/// details.
 ///
 /// [trace-flags]: https://www.w3.org/TR/trace-context/#trace-flags
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Copy, Hash)]
 pub struct TraceFlags(u8);
 
 impl TraceFlags {
+    /// Trace flags with the `sampled` flag set to `0`.
+    ///
+    /// Spans that are not sampled will be ignored by most tracing tools.
+    /// See the `sampled` section of the [W3C TraceContext specification] for details.
+    ///
+    /// [W3C TraceContext specification]: https://www.w3.org/TR/trace-context/#sampled-flag
+    pub const NOT_SAMPLED: TraceFlags = TraceFlags(0x00);
+
     /// Trace flags with the `sampled` flag set to `1`.
     ///
     /// Spans that are not sampled will be ignored by most tracing tools.
@@ -98,9 +94,8 @@ impl fmt::LowerHex for TraceFlags {
 /// A 16-byte value which identifies a given trace.
 ///
 /// The id is valid if it contains at least one non-zero byte.
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
 #[derive(Clone, PartialEq, Eq, Copy, Hash)]
-pub struct TraceId(pub(crate) u128);
+pub struct TraceId(u128);
 
 impl TraceId {
     /// Invalid trace id
@@ -133,9 +128,9 @@ impl TraceId {
     }
 }
 
-impl From<[u8; 16]> for TraceId {
-    fn from(bytes: [u8; 16]) -> Self {
-        TraceId::from_bytes(bytes)
+impl From<u128> for TraceId {
+    fn from(value: u128) -> Self {
+        TraceId(value)
     }
 }
 
@@ -160,9 +155,8 @@ impl fmt::LowerHex for TraceId {
 /// An 8-byte value which identifies a given span.
 ///
 /// The id is valid if it contains at least one non-zero byte.
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
 #[derive(Clone, PartialEq, Eq, Copy, Hash)]
-pub struct SpanId(pub(crate) u64);
+pub struct SpanId(u64);
 
 impl SpanId {
     /// Invalid span id
@@ -195,9 +189,9 @@ impl SpanId {
     }
 }
 
-impl From<[u8; 8]> for SpanId {
-    fn from(bytes: [u8; 8]) -> Self {
-        SpanId::from_bytes(bytes)
+impl From<u64> for SpanId {
+    fn from(value: u64) -> Self {
+        SpanId(value)
     }
 }
 
@@ -226,11 +220,13 @@ impl fmt::LowerHex for SpanId {
 /// Please review the [W3C specification] for details on this field.
 ///
 /// [W3C specification]: https://www.w3.org/TR/trace-context/#tracestate-header
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct TraceState(Option<VecDeque<(String, String)>>);
 
 impl TraceState {
+    /// The default `TraceState`, as a constant
+    pub const NONE: TraceState = TraceState(None);
+
     /// Validates that the given `TraceState` list-member key is valid per the [W3 Spec].
     ///
     /// [W3 Spec]: https://www.w3.org/TR/trace-context/#key
@@ -279,15 +275,15 @@ impl TraceState {
     /// # Examples
     ///
     /// ```
-    /// use opentelemetry::trace::{TraceState, TraceStateError};
+    /// use opentelemetry::trace::TraceState;
     ///
     /// let kvs = vec![("foo", "bar"), ("apple", "banana")];
-    /// let trace_state: Result<TraceState, TraceStateError> = TraceState::from_key_value(kvs);
+    /// let trace_state = TraceState::from_key_value(kvs);
     ///
     /// assert!(trace_state.is_ok());
     /// assert_eq!(trace_state.unwrap().header(), String::from("foo=bar,apple=banana"))
     /// ```
-    pub fn from_key_value<T, K, V>(trace_state: T) -> Result<Self, TraceStateError>
+    pub fn from_key_value<T, K, V>(trace_state: T) -> TraceResult<Self>
     where
         T: IntoIterator<Item = (K, V)>,
         K: ToString,
@@ -298,10 +294,10 @@ impl TraceState {
             .map(|(key, value)| {
                 let (key, value) = (key.to_string(), value.to_string());
                 if !TraceState::valid_key(key.as_str()) {
-                    return Err(TraceStateError::InvalidKey(key));
+                    return Err(TraceStateError::Key(key));
                 }
                 if !TraceState::valid_value(value.as_str()) {
-                    return Err(TraceStateError::InvalidValue(value));
+                    return Err(TraceStateError::Value(value));
                 }
 
                 Ok((key, value))
@@ -334,17 +330,17 @@ impl TraceState {
     /// updated key/value is returned.
     ///
     /// [W3 Spec]: https://www.w3.org/TR/trace-context/#mutating-the-tracestate-field
-    pub fn insert<K, V>(&self, key: K, value: V) -> Result<TraceState, TraceStateError>
+    pub fn insert<K, V>(&self, key: K, value: V) -> TraceResult<TraceState>
     where
         K: Into<String>,
         V: Into<String>,
     {
         let (key, value) = (key.into(), value.into());
         if !TraceState::valid_key(key.as_str()) {
-            return Err(TraceStateError::InvalidKey(key));
+            return Err(TraceStateError::Key(key).into());
         }
         if !TraceState::valid_value(value.as_str()) {
-            return Err(TraceStateError::InvalidValue(value));
+            return Err(TraceStateError::Value(value).into());
         }
 
         let mut trace_state = self.delete_from_deque(key.clone());
@@ -362,10 +358,10 @@ impl TraceState {
     /// If the key is not in `TraceState`. The original `TraceState` will be cloned and returned.
     ///
     /// [W3 Spec]: https://www.w3.org/TR/trace-context/#mutating-the-tracestate-field
-    pub fn delete<K: Into<String>>(&self, key: K) -> Result<TraceState, TraceStateError> {
+    pub fn delete<K: Into<String>>(&self, key: K) -> TraceResult<TraceState> {
         let key = key.into();
         if !TraceState::valid_key(key.as_str()) {
-            return Err(TraceStateError::InvalidKey(key));
+            return Err(TraceStateError::Key(key).into());
         }
 
         Ok(self.delete_from_deque(key))
@@ -403,7 +399,7 @@ impl TraceState {
 }
 
 impl FromStr for TraceState {
-    type Err = TraceStateError;
+    type Err = TraceError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let list_members: Vec<&str> = s.split_terminator(',').collect();
@@ -411,7 +407,7 @@ impl FromStr for TraceState {
 
         for list_member in list_members {
             match list_member.find('=') {
-                None => return Err(TraceStateError::InvalidList(list_member.to_string())),
+                None => return Err(TraceStateError::List(list_member.to_string()).into()),
                 Some(separator_index) => {
                     let (key, value) = list_member.split_at(separator_index);
                     key_value_pairs
@@ -427,25 +423,41 @@ impl FromStr for TraceState {
 /// Error returned by `TraceState` operations.
 #[derive(Error, Debug)]
 #[non_exhaustive]
-pub enum TraceStateError {
-    /// The key is invalid. See <https://www.w3.org/TR/trace-context/#key> for requirement for keys.
+enum TraceStateError {
+    /// The key is invalid.
+    ///
+    /// See <https://www.w3.org/TR/trace-context/#key> for requirement for keys.
     #[error("{0} is not a valid key in TraceState, see https://www.w3.org/TR/trace-context/#key for more details")]
-    InvalidKey(String),
+    Key(String),
 
-    /// The value is invalid. See <https://www.w3.org/TR/trace-context/#value> for requirement for values.
+    /// The value is invalid.
+    ///
+    /// See <https://www.w3.org/TR/trace-context/#value> for requirement for values.
     #[error("{0} is not a valid value in TraceState, see https://www.w3.org/TR/trace-context/#value for more details")]
-    InvalidValue(String),
+    Value(String),
 
-    /// The value is invalid. See <https://www.w3.org/TR/trace-context/#list> for requirement for list members.
+    /// The list is invalid.
+    ///
+    /// See <https://www.w3.org/TR/trace-context/#list> for requirement for list members.
     #[error("{0} is not a valid list member in TraceState, see https://www.w3.org/TR/trace-context/#list for more details")]
-    InvalidList(String),
+    List(String),
 }
 
-/// Immutable portion of a `Span` which can be serialized and propagated.
+impl From<TraceStateError> for TraceError {
+    fn from(err: TraceStateError) -> Self {
+        TraceError::Other(Box::new(err))
+    }
+}
+
+/// Immutable portion of a [`Span`] which can be serialized and propagated.
+///
+/// This representation conforms to the [W3C TraceContext specification].
 ///
 /// Spans that do not have the `sampled` flag set in their [`TraceFlags`] will
 /// be ignored by most tracing tools.
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
+///
+/// [`Span`]: crate::trace::Span
+/// [W3C TraceContext specification]: https://www.w3.org/TR/trace-context
 #[derive(Clone, Debug, PartialEq, Hash, Eq)]
 pub struct SpanContext {
     trace_id: TraceId,
@@ -456,15 +468,18 @@ pub struct SpanContext {
 }
 
 impl SpanContext {
+    /// An invalid span context
+    pub const NONE: SpanContext = SpanContext {
+        trace_id: TraceId::INVALID,
+        span_id: SpanId::INVALID,
+        trace_flags: TraceFlags::NOT_SAMPLED,
+        is_remote: false,
+        trace_state: TraceState::NONE,
+    };
+
     /// Create an invalid empty span context
     pub fn empty_context() -> Self {
-        SpanContext::new(
-            TraceId::INVALID,
-            SpanId::INVALID,
-            TraceFlags::default(),
-            false,
-            TraceState::default(),
-        )
+        SpanContext::NONE
     }
 
     /// Construct a new `SpanContext`
@@ -484,29 +499,31 @@ impl SpanContext {
         }
     }
 
-    /// A valid trace identifier is a non-zero `u128`.
+    /// The [`TraceId`] for this span context.
     pub fn trace_id(&self) -> TraceId {
         self.trace_id
     }
 
-    /// A valid span identifier is a non-zero `u64`.
+    /// The [`SpanId`] for this span context.
     pub fn span_id(&self) -> SpanId {
         self.span_id
     }
 
-    /// Returns details about the trace. Unlike `TraceState` values, these are
-    /// present in all traces. Currently, the only option is a boolean sampled flag.
+    /// Returns details about the trace.
+    ///
+    /// Unlike `TraceState` values, these are present in all traces. The current
+    /// version of the specification only supports a single flag [`TraceFlags::SAMPLED`].
     pub fn trace_flags(&self) -> TraceFlags {
         self.trace_flags
     }
 
-    /// Returns a bool flag which is true if the `SpanContext` has a valid (non-zero) `trace_id`
-    /// and a valid (non-zero) `span_id`.
+    /// Returns `true` if the span context has a valid (non-zero) `trace_id` and a
+    /// valid (non-zero) `span_id`.
     pub fn is_valid(&self) -> bool {
-        self.trace_id.0 != 0 && self.span_id.0 != 0
+        self.trace_id != TraceId::INVALID && self.span_id != SpanId::INVALID
     }
 
-    /// Returns true if the `SpanContext` was propagated from a remote parent.
+    /// Returns `true` if the span context was propagated from a remote parent.
     pub fn is_remote(&self) -> bool {
         self.is_remote
     }
@@ -518,7 +535,7 @@ impl SpanContext {
         self.trace_flags.is_sampled()
     }
 
-    /// Returns the context's `TraceState`.
+    /// A reference to the span context's [`TraceState`].
     pub fn trace_state(&self) -> &TraceState {
         &self.trace_state
     }
@@ -527,6 +544,7 @@ impl SpanContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{trace::TraceContextExt, Context};
 
     #[rustfmt::skip]
     fn trace_id_test_data() -> Vec<(TraceId, &'static str, [u8; 16])> {
@@ -629,5 +647,28 @@ mod tests {
         let inserted_trace_state = trace_state.insert("testkey", "testvalue").unwrap();
         assert!(trace_state.get("testkey").is_none()); // The original state doesn't change
         assert_eq!(inserted_trace_state.get("testkey").unwrap(), "testvalue"); //
+    }
+
+    #[test]
+    fn test_context_span_debug() {
+        let cx = Context::current();
+        assert_eq!(
+            format!("{:?}", cx),
+            "Context { span: \"None\", entries: 0 }"
+        );
+        let cx = Context::current().with_remote_span_context(SpanContext::NONE);
+        assert_eq!(
+            format!("{:?}", cx),
+            "Context { \
+               span: SpanContext { \
+                       trace_id: 00000000000000000000000000000000, \
+                       span_id: 0000000000000000, \
+                       trace_flags: TraceFlags(0), \
+                       is_remote: false, \
+                       trace_state: TraceState(None) \
+                     }, \
+               entries: 1 \
+             }"
+        );
     }
 }

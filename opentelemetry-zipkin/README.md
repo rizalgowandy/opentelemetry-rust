@@ -1,8 +1,8 @@
+# OpenTelemetry Zipkin Exporter
+
 ![OpenTelemetry — An observability framework for cloud-native software.][splash]
 
 [splash]: https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/main/assets/logo-text.png
-
-# OpenTelemetry Zipkin
 
 [`Zipkin`] integration for applications instrumented with [`OpenTelemetry`].
 
@@ -10,24 +10,27 @@
 [![Documentation](https://docs.rs/opentelemetry-zipkin/badge.svg)](https://docs.rs/opentelemetry-zipkin)
 [![LICENSE](https://img.shields.io/crates/l/opentelemetry-zipkin)](./LICENSE)
 [![GitHub Actions CI](https://github.com/open-telemetry/opentelemetry-rust/workflows/CI/badge.svg)](https://github.com/open-telemetry/opentelemetry-rust/actions?query=workflow%3ACI+branch%3Amain)
-[![Gitter chat](https://img.shields.io/badge/gitter-join%20chat%20%E2%86%92-brightgreen.svg)](https://gitter.im/open-telemetry/opentelemetry-rust)
+[![Slack](https://img.shields.io/badge/slack-@cncf/otel/rust-brightgreen.svg?logo=slack)](https://cloud-native.slack.com/archives/C03GDP0H023)
 
-[Documentation](https://docs.rs/opentelemetry-zipkin) |
-[Chat](https://gitter.im/open-telemetry/opentelemetry-rust)
+## OpenTelemetry Overview
 
-## Overview
+OpenTelemetry is an Observability framework and toolkit designed to create and
+manage telemetry data such as traces, metrics, and logs. OpenTelemetry is
+vendor- and tool-agnostic, meaning that it can be used with a broad variety of
+Observability backends, including open source tools like [Jaeger] and
+[Prometheus], as well as commercial offerings.
 
-[`OpenTelemetry`] is a collection of tools, APIs, and SDKs used to instrument,
-generate, collect, and export telemetry data (metrics, logs, and traces) for
-analysis in order to understand your software's performance and behavior. This
-crate provides a trace pipeline and exporter for sending span information to a
-Zipkin collector for processing and visualization.
-
-*Compiler support: [requires `rustc` 1.46+][msrv]*
+OpenTelemetry is *not* an observability backend like Jaeger, Prometheus, or other
+commercial vendors. OpenTelemetry is focused on the generation, collection,
+management, and export of telemetry. A major goal of OpenTelemetry is that you
+can easily instrument your applications or systems, no matter their language,
+infrastructure, or runtime environment. Crucially, the storage and visualization
+of telemetry is intentionally left to other tools.
 
 [`Zipkin`]: https://zipkin.io/
 [`OpenTelemetry`]: https://crates.io/crates/opentelemetry
-[msrv]: #supported-rust-versions
+
+*[Supported Rust Versions](#supported-rust-versions)*
 
 ## Quickstart
 
@@ -52,8 +55,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     tracer.in_span("doing_work", |cx| {
         // Traced app logic here...
     });
-    
-    global::shutdown_tracer_provider();
+
+    provider.shutdown().expect("TracerProvider should shutdown successfully");
 
     Ok(())
 }
@@ -69,13 +72,14 @@ automatically.
 
 ```toml
 [dependencies]
-opentelemetry = { version = "*", features = ["rt-tokio"] }
+opentelemetry = "*"
+opentelemetry_sdk = { version = "*", features = ["rt-tokio"] }
 opentelemetry-zipkin = { version = "*", features = ["reqwest-client"], default-features = false }
 ```
 
 ```rust
 let tracer = opentelemetry_zipkin::new_pipeline()
-    .install_batch(opentelemetry::runtime::Tokio)?;
+    .install_batch(opentelemetry_sdk::runtime::Tokio)?;
 ```
 
 [`rt-tokio`]: https://tokio.rs
@@ -88,9 +92,8 @@ a manual implementation of the [`HttpClient`] trait. By default the
 `reqwest-blocking-client` feature is enabled which will use the `reqwest` crate.
 While this is compatible with both async and non-async projects, it is not
 optimal for high-performance async applications as it will block the executor
-thread. Consider using the `reqwest-client` (without blocking) or `surf-client`
-features if you are in the `tokio` or `async-std` ecosystems respectively, or
-select whichever client you prefer as shown below.
+thread. Consider using the `reqwest-client` (without blocking) if you are in
+the `tokio` ecosystem.
 
 Note that async http clients may require a specific async runtime to be
 available so be sure to match them appropriately.
@@ -102,12 +105,12 @@ available so be sure to match them appropriately.
 [Example](https://docs.rs/opentelemetry-zipkin/latest/opentelemetry_zipkin/#kitchen-sink-full-configuration) showing how to override all configuration options. See the
 [`ZipkinPipelineBuilder`] docs for details of each option.
 
-[`ZipkinPipelineBuilder`]: struct.ZipkinPipelineBuilder.html
+[`ZipkinPipelineBuilder`]: https://docs.rs/opentelemetry-zipkin/latest/opentelemetry_zipkin/struct.ZipkinPipelineBuilder.html
 
 ## Supported Rust Versions
 
 OpenTelemetry is built against the latest stable release. The minimum supported
-version is 1.46. The current OpenTelemetry version is not guaranteed to build on
+version is 1.75.0. The current OpenTelemetry version is not guaranteed to build on
 Rust versions earlier than the minimum supported version.
 
 The current stable Rust compiler and the three most recent minor versions before

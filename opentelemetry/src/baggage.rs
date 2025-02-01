@@ -1,65 +1,37 @@
-//! Primitives for sending name-value data across system boundaries.
+//! Primitives for sending name/value data across system boundaries.
+//!
+//! Baggage is used to annotate telemetry, adding context and information to
+//! metrics, traces, and logs. It is a set of name/value pairs describing
+//! user-defined properties. Each name in Baggage is associated with exactly one
+//! value.
 //!
 //! Main types in this module are:
 //!
-//! * [`Baggage`]: Baggage is used to annotate telemetry, adding context and
-//!   information to metrics, traces, and logs.
+//! * [`Baggage`]: A set of name/value pairs describing user-defined properties.
 //! * [`BaggageExt`]: Extensions for managing `Baggage` in a [`Context`].
 //!
-//! Baggage can be sent between systems using the [`BaggagePropagator`] in
+//! Baggage can be sent between systems using a baggage propagator in
 //! accordance with the [W3C Baggage] specification.
 //!
-//! [`BaggagePropagator`]: crate::sdk::propagation::BaggagePropagator
 //! [W3C Baggage]: https://w3c.github.io/baggage
-//!
-//! # Examples
-//!
-//! ```
-//! # #[cfg(feature = "trace")]
-//! # {
-//! use opentelemetry::{baggage::BaggageExt, Key, propagation::TextMapPropagator};
-//! use opentelemetry::sdk::propagation::BaggagePropagator;
-//! use std::collections::HashMap;
-//!
-//! // Example baggage value passed in externally via http headers
-//! let mut headers = HashMap::new();
-//! headers.insert("baggage".to_string(), "user_id=1".to_string());
-//!
-//! let propagator = BaggagePropagator::new();
-//! // can extract from any type that impls `Extractor`, usually an HTTP header map
-//! let cx = propagator.extract(&headers);
-//!
-//! // Iterate over extracted name-value pairs
-//! for (name, value) in cx.baggage() {
-//!     // ...
-//! }
-//!
-//! // Add new baggage
-//! let cx_with_additions = cx.with_baggage(vec![Key::new("server_id").i64(42)]);
-//!
-//! // Inject baggage into http request
-//! propagator.inject_context(&cx_with_additions, &mut headers);
-//!
-//! let header_value = headers.get("baggage").expect("header is injected");
-//! assert!(header_value.contains("user_id=1"), "still contains previous name-value");
-//! assert!(header_value.contains("server_id=42"), "contains new name-value pair");
-//! # }
-//! ```
 use crate::{Context, Key, KeyValue, Value};
-#[cfg(feature = "serialize")]
-use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap};
-use std::iter::FromIterator;
+use std::fmt;
+use std::sync::OnceLock;
 
-lazy_static::lazy_static! {
-    static ref DEFAULT_BAGGAGE: Baggage = Baggage::default();
-}
+static DEFAULT_BAGGAGE: OnceLock<Baggage> = OnceLock::new();
 
 const MAX_KEY_VALUE_PAIRS: usize = 180;
 const MAX_BYTES_FOR_ONE_PAIR: usize = 4096;
 const MAX_LEN_OF_ALL_PAIRS: usize = 8192;
 
-/// A set of name-value pairs describing user-defined properties.
+/// Returns the default baggage, ensuring it is initialized only once.
+#[inline]
+fn get_default_baggage() -> &'static Baggage {
+    DEFAULT_BAGGAGE.get_or_init(Baggage::default)
+}
+
+/// A set of name/value pairs describing user-defined properties.
 ///
 /// ### Baggage Names
 ///
@@ -72,14 +44,14 @@ const MAX_LEN_OF_ALL_PAIRS: usize = 8192;
 /// ### Baggage Value Metadata
 ///
 /// Additional metadata can be added to values in the form of a property set,
-/// represented as semi-colon `;` delimited list of names and/or name-value pairs,
+/// represented as semi-colon `;` delimited list of names and/or name/value pairs,
 /// e.g. `;k1=v1;k2;k3=v3`.
 ///
 /// ### Limits
 ///
-/// * Maximum number of name-value pairs: `180`.
-/// * Maximum number of bytes per a single name-value pair: `4096`.
-/// * Maximum total length of all name-value pairs: `8192`.
+/// * Maximum number of name/value pairs: `180`.
+/// * Maximum number of bytes per a single name/value pair: `4096`.
+/// * Maximum total length of all name/value pairs: `8192`.
 ///
 /// [RFC2616, Section 2.2]: https://tools.ietf.org/html/rfc2616#section-2.2
 #[derive(Debug, Default)]
@@ -109,8 +81,8 @@ impl Baggage {
     ///
     /// assert_eq!(cc.get("my-name"), Some(&Value::from("my-value")))
     /// ```
-    pub fn get<T: Into<Key>>(&self, key: T) -> Option<&Value> {
-        self.inner.get(&key.into()).map(|(value, _metadata)| value)
+    pub fn get<K: AsRef<str>>(&self, key: K) -> Option<&Value> {
+        self.inner.get(key.as_ref()).map(|(value, _metadata)| value)
     }
 
     /// Returns a reference to the value and metadata associated with a given name
@@ -125,11 +97,11 @@ impl Baggage {
     /// // By default, the metadata is empty
     /// assert_eq!(cc.get_with_metadata("my-name"), Some(&(Value::from("my-value"), BaggageMetadata::from(""))))
     /// ```
-    pub fn get_with_metadata<T: Into<Key>>(&self, key: T) -> Option<&(Value, BaggageMetadata)> {
-        self.inner.get(&key.into())
+    pub fn get_with_metadata<K: AsRef<str>>(&self, key: K) -> Option<&(Value, BaggageMetadata)> {
+        self.inner.get(key.as_ref())
     }
 
-    /// Inserts a name-value pair into the baggage.
+    /// Inserts a name/value pair into the baggage.
     ///
     /// If the name was not present, [`None`] is returned. If the name was present,
     /// the value is updated, and the old value is returned.
@@ -153,7 +125,7 @@ impl Baggage {
             .map(|pair| pair.0)
     }
 
-    /// Inserts a name-value pair into the baggage.
+    /// Inserts a name/value pair into the baggage.
     ///
     /// Same with `insert`, if the name was not present, [`None`] will be returned.
     /// If the name is present, the old value and metadata will be returned.
@@ -314,17 +286,50 @@ impl FromIterator<KeyValueMetadata> for Baggage {
     }
 }
 
+fn encode(s: &str) -> String {
+    let mut encoded_string = String::with_capacity(s.len());
+
+    for byte in s.as_bytes() {
+        match *byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'_' | b'~' => {
+                encoded_string.push(*byte as char)
+            }
+            b' ' => encoded_string.push_str("%20"),
+            _ => encoded_string.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    encoded_string
+}
+
+impl fmt::Display for Baggage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, (k, v)) in self.into_iter().enumerate() {
+            write!(f, "{}={}", k, encode(v.0.as_str().as_ref()))?;
+            if !v.1.as_str().is_empty() {
+                write!(f, ";{}", v.1)?;
+            }
+
+            if i < self.len() - 1 {
+                write!(f, ",")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Methods for sorting and retrieving baggage data in a context.
 pub trait BaggageExt {
-    /// Returns a clone of the given context with the included name-value pairs.
+    /// Returns a clone of the given context with the included name/value pairs.
     ///
     /// # Examples
     ///
     /// ```
     /// use opentelemetry::{baggage::BaggageExt, Context, KeyValue, Value};
     ///
-    /// let some_context = Context::current();
-    /// let cx = some_context.with_baggage(vec![KeyValue::new("my-name", "my-value")]);
+    /// let cx = Context::map_current(|cx| {
+    ///     cx.with_baggage(vec![KeyValue::new("my-name", "my-value")])
+    /// });
     ///
     /// assert_eq!(
     ///     cx.baggage().get("my-name"),
@@ -336,7 +341,7 @@ pub trait BaggageExt {
         baggage: T,
     ) -> Self;
 
-    /// Returns a clone of the current context with the included name-value pairs.
+    /// Returns a clone of the current context with the included name/value pairs.
     ///
     /// # Examples
     ///
@@ -354,14 +359,14 @@ pub trait BaggageExt {
         baggage: T,
     ) -> Self;
 
-    /// Returns a clone of the given context with the included name-value pairs.
+    /// Returns a clone of the given context with no baggage.
     ///
     /// # Examples
     ///
     /// ```
     /// use opentelemetry::{baggage::BaggageExt, Context, KeyValue, Value};
     ///
-    /// let cx = Context::current().with_cleared_baggage();
+    /// let cx = Context::map_current(|cx| cx.with_cleared_baggage());
     ///
     /// assert_eq!(cx.baggage().len(), 0);
     /// ```
@@ -392,7 +397,7 @@ impl BaggageExt for Context {
     }
 
     fn current_with_baggage<T: IntoIterator<Item = I>, I: Into<KeyValueMetadata>>(kvs: T) -> Self {
-        Context::current().with_baggage(kvs)
+        Context::map_current(|cx| cx.with_baggage(kvs))
     }
 
     fn with_cleared_baggage(&self) -> Self {
@@ -400,17 +405,16 @@ impl BaggageExt for Context {
     }
 
     fn baggage(&self) -> &Baggage {
-        self.get::<Baggage>().unwrap_or(&DEFAULT_BAGGAGE)
+        self.get::<Baggage>().unwrap_or(get_default_baggage())
     }
 }
 
 /// An optional property set that can be added to [`Baggage`] values.
 ///
 /// `BaggageMetadata` can be added to values in the form of a property set,
-/// represented as semi-colon `;` delimited list of names and/or name-value
+/// represented as semi-colon `;` delimited list of names and/or name/value
 /// pairs, e.g. `;k1=v1;k2;k3=v3`.
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
-#[derive(Clone, Debug, PartialOrd, PartialEq, Default)]
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Default)]
 pub struct BaggageMetadata(String);
 
 impl BaggageMetadata {
@@ -432,8 +436,13 @@ impl From<&str> for BaggageMetadata {
     }
 }
 
-/// [`Baggage`] name-value pairs with their associated metadata.
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
+impl fmt::Display for BaggageMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(write!(f, "{}", self.as_str())?)
+    }
+}
+
+/// [`Baggage`] name/value pairs with their associated metadata.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyValueMetadata {
     /// Dimension or event key
@@ -472,6 +481,8 @@ impl From<KeyValue> for KeyValueMetadata {
 
 #[cfg(test)]
 mod tests {
+    use crate::StringValue;
+
     use super::*;
 
     #[test]
@@ -482,12 +493,36 @@ mod tests {
     }
 
     #[test]
+    fn test_ascii_values() {
+        let string1 = "test_ 123";
+        let string2 = "Hello123";
+        let string3 = "This & That = More";
+        let string4 = "Unicode: 😊";
+        let string5 = "Non-ASCII: áéíóú";
+        let string6 = "Unsafe: ~!@#$%^&*()_+{}[];:'\\\"<>?,./";
+        let string7: &str = "🚀Unicode:";
+        let string8 = "ΑΒΓ";
+
+        assert_eq!(encode(string1), "test_%20123");
+        assert_eq!(encode(string2), "Hello123");
+        assert_eq!(encode(string3), "This%20%26%20That%20%3D%20More");
+        assert_eq!(encode(string4), "Unicode%3A%20%F0%9F%98%8A");
+        assert_eq!(
+            encode(string5),
+            "Non-ASCII%3A%20%C3%A1%C3%A9%C3%AD%C3%B3%C3%BA"
+        );
+        assert_eq!(encode(string6), "Unsafe%3A%20~%21%40%23%24%25%5E%26%2A%28%29_%2B%7B%7D%5B%5D%3B%3A%27%5C%22%3C%3E%3F%2C.%2F");
+        assert_eq!(encode(string7), "%F0%9F%9A%80Unicode%3A");
+        assert_eq!(encode(string8), "%CE%91%CE%92%CE%93");
+    }
+
+    #[test]
     fn insert_too_much_baggage() {
         // too many key pairs
         let over_limit = MAX_KEY_VALUE_PAIRS + 1;
         let mut data = Vec::with_capacity(over_limit);
         for i in 0..over_limit {
-            data.push(KeyValue::new(format!("key{}", i), format!("key{}", i)))
+            data.push(KeyValue::new(format!("key{i}"), format!("key{i}")))
         }
         let baggage = data.into_iter().collect::<Baggage>();
         assert_eq!(baggage.len(), MAX_KEY_VALUE_PAIRS)
@@ -529,5 +564,48 @@ mod tests {
         }
         let baggage = data.into_iter().collect::<Baggage>();
         assert_eq!(baggage.len(), 3)
+    }
+
+    #[test]
+    fn serialize_baggage_as_string() {
+        // Empty baggage
+        let b = Baggage::default();
+        assert_eq!("", b.to_string());
+
+        // "single member empty value no properties"
+        let mut b = Baggage::default();
+        b.insert("foo", StringValue::from(""));
+        assert_eq!("foo=", b.to_string());
+
+        // "single member no properties"
+        let mut b = Baggage::default();
+        b.insert("foo", StringValue::from("1"));
+        assert_eq!("foo=1", b.to_string());
+
+        // "URL encoded value"
+        let mut b = Baggage::default();
+        b.insert("foo", StringValue::from("1=1"));
+        assert_eq!("foo=1%3D1", b.to_string());
+
+        // "single member empty value with properties"
+        let mut b = Baggage::default();
+        b.insert_with_metadata(
+            "foo",
+            StringValue::from(""),
+            BaggageMetadata::from("red;state=on"),
+        );
+        assert_eq!("foo=;red;state=on", b.to_string());
+
+        // "single member with properties"
+        let mut b = Baggage::default();
+        b.insert_with_metadata("foo", StringValue::from("1"), "red;state=on;z=z=z");
+        assert_eq!("foo=1;red;state=on;z=z=z", b.to_string());
+
+        // "two members with properties"
+        let mut b = Baggage::default();
+        b.insert_with_metadata("foo", StringValue::from("1"), "red;state=on");
+        b.insert_with_metadata("bar", StringValue::from("2"), "yellow");
+        assert!(b.to_string().contains("bar=2;yellow"));
+        assert!(b.to_string().contains("foo=1;red;state=on"));
     }
 }

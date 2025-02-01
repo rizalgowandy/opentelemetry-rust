@@ -7,37 +7,45 @@
 //! through a system. This module implements the OpenTelemetry [trace
 //! specification].
 //!
-//! [trace specification]: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.3.0/specification/trace/api.md
+//! [trace specification]: https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md
 //!
 //! ## Getting Started
 //!
 //! In application code:
 //!
-//! ```no_run
-//! # #[cfg(feature = "trace")]
-//! # {
-//! use opentelemetry::{global, sdk::export::trace::stdout, trace::Tracer};
+//! ```
+//! use opentelemetry::trace::{Tracer, noop::NoopTracerProvider};
+//! use opentelemetry::global;
 //!
-//! fn main() {
-//!     // Create a new trace pipeline that prints to stdout
-//!     let tracer = stdout::new_pipeline().install_simple();
+//! fn init_tracer() {
+//!     // Swap this no-op provider for your tracing service of choice (jaeger, zipkin, etc)
+//!     let provider = NoopTracerProvider::new();
+//!
+//!     // Configure the global `TracerProvider` singleton when your app starts
+//!     // (there is a no-op default if this is not set by your application)
+//!     let _ = global::set_tracer_provider(provider);
+//! }
+//!
+//! fn do_something_tracked() {
+//!     // Then you can get a named tracer instance anywhere in your codebase.
+//!     let tracer = global::tracer("my-component");
 //!
 //!     tracer.in_span("doing_work", |cx| {
 //!         // Traced app logic here...
 //!     });
-//!
-//!     // Shutdown trace pipeline
-//!     global::shutdown_tracer_provider();
 //! }
-//! # }
+//!
+//! // in main or other app start
+//! init_tracer();
+//! do_something_tracked();
 //! ```
 //!
 //! In library code:
 //!
 //! ```
-//! # #[cfg(feature = "trace")]
-//! # {
 //! use opentelemetry::{global, trace::{Span, Tracer, TracerProvider}};
+//! use opentelemetry::InstrumentationScope;
+//! use std::sync::Arc;
 //!
 //! fn my_library_function() {
 //!     // Use the global tracer provider to get access to the user-specified
@@ -45,11 +53,12 @@
 //!     let tracer_provider = global::tracer_provider();
 //!
 //!     // Get a tracer for this library
-//!     let tracer = tracer_provider.versioned_tracer(
-//!         "my_name",
-//!         Some(env!("CARGO_PKG_VERSION")),
-//!         None
-//!     );
+//!     let scope = InstrumentationScope::builder("my_name")
+//!         .with_version(env!("CARGO_PKG_VERSION"))
+//!         .with_schema_url("https://opentelemetry.io/schemas/1.17.0")
+//!         .build();
+//!
+//!     let tracer = tracer_provider.tracer_with_scope(scope);
 //!
 //!     // Create spans
 //!     let mut span = tracer.start("doing_work");
@@ -59,7 +68,6 @@
 //!     // End the span
 //!     span.end();
 //! }
-//! # }
 //! ```
 //!
 //! ## Overview
@@ -75,12 +83,11 @@
 //!
 //! Exporting spans often involves sending data over a network or performing
 //! other I/O tasks. OpenTelemetry allows you to schedule these tasks using
-//! whichever runtime you area already using such as [Tokio] or [async-std].
-//! When using an async runtime it's best to use the [`BatchSpanProcessor`]
+//! whichever runtime you are already using such as [Tokio] or [async-std].
+//! When using an async runtime it's best to use the batch span processor
 //! where the spans will be sent in batches as opposed to being sent once ended,
 //! which often ends up being more efficient.
 //!
-//! [`BatchSpanProcessor`]: crate::sdk::trace::BatchSpanProcessor
 //! [Tokio]: https://tokio.rs
 //! [async-std]: https://async.rs
 //!
@@ -95,16 +102,14 @@
 //! [`Context`]: crate::Context
 //!
 //! ```
-//! # #[cfg(feature = "trace")]
-//! # {
-//! use opentelemetry::{global, trace::{self, Span, StatusCode, Tracer, TracerProvider}};
+//! use opentelemetry::{global, trace::{self, Span, Status, Tracer, TracerProvider}};
 //!
 //! fn may_error(rand: f32) {
 //!     if rand < 0.5 {
 //!         // Get the currently active span to record additional attributes,
 //!         // status, etc.
 //!         trace::get_active_span(|span| {
-//!             span.set_status(StatusCode::Error, "value too small".into());
+//!             span.set_status(Status::error("value too small"));
 //!         });
 //!     }
 //! }
@@ -122,15 +127,12 @@
 //!
 //! // Drop the guard and the span will no longer be active
 //! drop(active)
-//! # }
 //! ```
 //!
-//! Additionally [`Tracer::with_span`] and [`Tracer::in_span`] can be used as shorthand to
-//! simplify managing the parent context.
+//! Additionally [`Tracer::in_span`] can be used as shorthand to simplify
+//! managing the parent context.
 //!
 //! ```
-//! # #[cfg(feature = "trace")]
-//! # {
 //! use opentelemetry::{global, trace::Tracer};
 //!
 //! // Get a tracer
@@ -141,13 +143,6 @@
 //! tracer.in_span("parent_span", |cx| {
 //!     // spans created here will be children of `parent_span`
 //! });
-//!
-//! // Use `with_span` to mark a span as active for a given period.
-//! let span = tracer.start("parent_span");
-//! tracer.with_span(span, |cx| {
-//!     // spans created here will be children of `parent_span`
-//! });
-//! # }
 //! ```
 //!
 //! #### Async active spans
@@ -155,11 +150,10 @@
 //! Async spans can be propagated with [`TraceContextExt`] and [`FutureExt`].
 //!
 //! ```
-//! # #[cfg(feature = "trace")]
-//! # {
 //! use opentelemetry::{Context, global, trace::{FutureExt, TraceContextExt, Tracer}};
 //!
 //! async fn some_work() { }
+//! # async fn in_an_async_context() {
 //!
 //! // Get a tracer
 //! let tracer = global::tracer("my_tracer");
@@ -168,19 +162,15 @@
 //! let span = tracer.start("my_span");
 //!
 //! // Perform some async work with this span as the currently active parent.
-//! some_work().with_context(Context::current_with_span(span));
+//! some_work().with_context(Context::current_with_span(span)).await;
 //! # }
 //! ```
 
-use futures_channel::{mpsc::TrySendError, oneshot::Canceled};
-#[cfg(feature = "serialize")]
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::fmt;
 use std::time;
 use thiserror::Error;
 
-mod context;
+pub(crate) mod context;
 pub mod noop;
 mod span;
 mod span_context;
@@ -188,13 +178,24 @@ mod tracer;
 mod tracer_provider;
 
 pub use self::{
-    context::{get_active_span, mark_span_as_active, FutureExt, SpanRef, TraceContextExt},
-    span::{Span, SpanKind, StatusCode},
-    span_context::{SpanContext, SpanId, TraceFlags, TraceId, TraceState, TraceStateError},
-    tracer::{SpanBuilder, Tracer},
+    context::{
+        get_active_span, mark_span_as_active, FutureExt, SpanRef, TraceContextExt, WithContext,
+    },
+    span::{Span, SpanKind, Status},
+    span_context::{SpanContext, SpanId, TraceFlags, TraceId, TraceState},
+    tracer::{SamplingDecision, SamplingResult, SpanBuilder, Tracer},
     tracer_provider::TracerProvider,
 };
-use crate::{sdk::export::ExportError, KeyValue};
+use crate::KeyValue;
+use std::sync::PoisonError;
+
+// TODO - Move ExportError and TraceError to opentelemetry-sdk
+
+/// Trait for errors returned by exporters
+pub trait ExportError: std::error::Error + Send + Sync + 'static {
+    /// The name of exporter that returned this error
+    fn exporter_name(&self) -> &'static str;
+}
 
 /// Describe the result of operations in tracing API.
 pub type TraceResult<T> = Result<T, TraceError>;
@@ -204,12 +205,16 @@ pub type TraceResult<T> = Result<T, TraceError>;
 #[non_exhaustive]
 pub enum TraceError {
     /// Export failed with the error returned by the exporter
-    #[error("Exporter {} encountered the following error(s): {0}", .0.exporter_name())]
+    #[error("Exporter {0} encountered the following error(s): {name}", name = .0.exporter_name())]
     ExportFailed(Box<dyn ExportError>),
 
     /// Export failed to finish after certain period and processor stopped the export.
     #[error("Exporting timed out after {} seconds", .0.as_secs())]
     ExportTimedOut(time::Duration),
+
+    /// already shutdown error
+    #[error("TracerProvider already shutdown")]
+    TracerProviderAlreadyShutdown,
 
     /// Other errors propagated from trace SDK that weren't covered above
     #[error(transparent)]
@@ -225,18 +230,6 @@ where
     }
 }
 
-impl<T> From<TrySendError<T>> for TraceError {
-    fn from(err: TrySendError<T>) -> Self {
-        TraceError::Other(Box::new(err.into_send_error()))
-    }
-}
-
-impl From<Canceled> for TraceError {
-    fn from(err: Canceled) -> Self {
-        TraceError::Other(Box::new(err))
-    }
-}
-
 impl From<String> for TraceError {
     fn from(err_msg: String) -> Self {
         TraceError::Other(Box::new(Custom(err_msg)))
@@ -249,32 +242,32 @@ impl From<&'static str> for TraceError {
     }
 }
 
+impl<T> From<PoisonError<T>> for TraceError {
+    fn from(err: PoisonError<T>) -> Self {
+        TraceError::Other(err.to_string().into())
+    }
+}
+
 /// Wrap type for string
 #[derive(Error, Debug)]
 #[error("{0}")]
 struct Custom(String);
 
-/// Interface for generating IDs
-pub trait IdGenerator: Send + Sync + fmt::Debug {
-    /// Generate a new `TraceId`
-    fn new_trace_id(&self) -> TraceId;
-
-    /// Generate a new `SpanId`
-    fn new_span_id(&self) -> SpanId;
-}
-
-/// A `Span` has the ability to add events. Events have a time associated
-/// with the moment when they are added to the `Span`.
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
+/// Events record things that happened during a [`Span`]'s lifetime.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
-    /// Event name
+    /// The name of this event.
     pub name: Cow<'static, str>,
-    /// Event timestamp
+
+    /// The time at which this event occurred.
     pub timestamp: time::SystemTime,
-    /// Event attributes
+
+    /// Attributes that describe this event.
     pub attributes: Vec<KeyValue>,
-    /// Number of dropped attributes
+
+    /// The number of attributes that were above the configured limit, and thus
+    /// dropped.
     pub dropped_attributes_count: u32,
 }
 
@@ -305,38 +298,43 @@ impl Event {
     }
 }
 
-/// During the `Span` creation user MUST have the ability to record links to other `Span`s. Linked
-/// `Span`s can be from the same or a different trace.
-#[cfg_attr(feature = "serialize", derive(Deserialize, Serialize))]
+/// Link is the relationship between two Spans.
+///
+/// The relationship can be within the same trace or across different traces.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Link {
-    span_context: SpanContext,
-    pub(crate) attributes: Vec<KeyValue>,
-    pub(crate) dropped_attributes_count: u32,
+    /// The span context of the linked span.
+    pub span_context: SpanContext,
+
+    /// Attributes that describe this link.
+    pub attributes: Vec<KeyValue>,
+
+    /// The number of attributes that were above the configured limit, and thus
+    /// dropped.
+    pub dropped_attributes_count: u32,
 }
 
 impl Link {
-    /// Create a new link
-    pub fn new(span_context: SpanContext, attributes: Vec<KeyValue>) -> Self {
+    /// Create new `Link`
+    pub fn new(
+        span_context: SpanContext,
+        attributes: Vec<KeyValue>,
+        dropped_attributes_count: u32,
+    ) -> Self {
         Link {
             span_context,
             attributes,
-            dropped_attributes_count: 0,
+            dropped_attributes_count,
         }
     }
 
-    /// The span context of the linked span
-    pub fn span_context(&self) -> &SpanContext {
-        &self.span_context
-    }
-
-    /// Attributes of the span link
-    pub fn attributes(&self) -> &Vec<KeyValue> {
-        &self.attributes
-    }
-
-    /// Dropped attributes count
-    pub fn dropped_attributes_count(&self) -> u32 {
-        self.dropped_attributes_count
+    /// Create new `Link` with given context
+    pub fn with_context(span_context: SpanContext) -> Self {
+        Link {
+            span_context,
+            attributes: Vec::new(),
+            dropped_attributes_count: 0,
+        }
     }
 }

@@ -1,12 +1,14 @@
-use crate::global::handle_error;
-use crate::trace::{noop::NoopTracerProvider, SpanContext, StatusCode, TraceResult};
+use crate::trace::{noop::NoopTracerProvider, SpanContext, Status};
+use crate::InstrumentationScope;
 use crate::{trace, trace::TracerProvider, Context, KeyValue};
 use std::borrow::Cow;
 use std::fmt;
 use std::mem;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 
+/// Allows a specific [`crate::trace::Span`] to be used generically by [`BoxedSpan`]
+/// instances by mirroring the interface and boxing the return types.
 pub trait ObjectSafeSpan {
     /// An API to record events at a specific time in the context of a given `Span`.
     ///
@@ -67,7 +69,7 @@ pub trait ObjectSafeSpan {
     /// to `Unset` will always be ignore, set the status to `Error` only works when current
     /// status is `Unset`, set the status to `Ok` will be consider final and any further call
     /// to this function will be ignore.
-    fn set_status(&mut self, code: StatusCode, message: String);
+    fn set_status(&mut self, status: Status);
 
     /// Updates the `Span`'s name. After this update, any sampling behavior based on the
     /// name will depend on the implementation.
@@ -82,6 +84,10 @@ pub trait ObjectSafeSpan {
     /// major change for a `Span` and may lead to re-calculation of sampling or
     /// filtering decisions made previously depending on the implementation.
     fn update_name(&mut self, new_name: Cow<'static, str>);
+
+    /// Adds a link to this span
+    ///
+    fn add_link(&mut self, span_context: SpanContext, attributes: Vec<KeyValue>);
 
     /// Finishes the `Span`.
     ///
@@ -101,7 +107,7 @@ pub trait ObjectSafeSpan {
     ///
     /// For more details, refer to [`Span::end`]
     ///
-    /// [`Span::end`]: Span::end()
+    /// [`Span::end`]: trace::Span::end
     fn end_with_timestamp(&mut self, timestamp: SystemTime);
 }
 
@@ -127,12 +133,16 @@ impl<T: trace::Span> ObjectSafeSpan for T {
         self.set_attribute(attribute)
     }
 
-    fn set_status(&mut self, code: StatusCode, message: String) {
-        self.set_status(code, message)
+    fn set_status(&mut self, status: Status) {
+        self.set_status(status)
     }
 
     fn update_name(&mut self, new_name: Cow<'static, str>) {
         self.update_name(new_name)
+    }
+
+    fn add_link(&mut self, span_context: SpanContext, attributes: Vec<KeyValue>) {
+        self.add_link(span_context, attributes)
     }
 
     fn end_with_timestamp(&mut self, timestamp: SystemTime) {
@@ -201,8 +211,8 @@ impl trace::Span for BoxedSpan {
 
     /// Sets the status of the `Span`. If used, this will override the default `Span`
     /// status, which is `Unset`.
-    fn set_status(&mut self, code: trace::StatusCode, message: String) {
-        self.0.set_status(code, message)
+    fn set_status(&mut self, status: trace::Status) {
+        self.0.set_status(status)
     }
 
     /// Updates the `Span`'s name.
@@ -211,6 +221,12 @@ impl trace::Span for BoxedSpan {
         T: Into<Cow<'static, str>>,
     {
         self.0.update_name(new_name.into())
+    }
+
+    /// Adds a link to this span
+    ///
+    fn add_link(&mut self, span_context: trace::SpanContext, attributes: Vec<KeyValue>) {
+        self.0.add_link(span_context, attributes)
     }
 
     /// Finishes the span with given timestamp.
@@ -226,6 +242,13 @@ impl trace::Span for BoxedSpan {
 /// [`GlobalTracerProvider`]: crate::global::GlobalTracerProvider
 pub struct BoxedTracer(Box<dyn ObjectSafeTracer + Send + Sync>);
 
+impl BoxedTracer {
+    /// Create a `BoxedTracer` from an object-safe tracer.
+    pub fn new(tracer: Box<dyn ObjectSafeTracer + Send + Sync>) -> Self {
+        BoxedTracer(tracer)
+    }
+}
+
 impl fmt::Debug for BoxedTracer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("BoxedTracer")
@@ -236,30 +259,6 @@ impl trace::Tracer for BoxedTracer {
     /// Global tracer uses `BoxedSpan`s so that it can be a global singleton,
     /// which is not possible if it takes generic type parameters.
     type Span = BoxedSpan;
-
-    /// Starts a new `Span`.
-    ///
-    /// Each span has zero or one parent spans and zero or more child spans, which
-    /// represent causally related operations. A tree of related spans comprises a
-    /// trace. A span is said to be a _root span_ if it does not have a parent. Each
-    /// trace includes a single root span, which is the shared ancestor of all other
-    /// spans in the trace.
-    fn start_with_context<T>(&self, name: T, parent_cx: &Context) -> Self::Span
-    where
-        T: Into<Cow<'static, str>>,
-    {
-        BoxedSpan(self.0.start_with_context_boxed(name.into(), parent_cx))
-    }
-
-    /// Creates a span builder
-    ///
-    /// An ergonomic way for attributes to be configured before the `Span` is started.
-    fn span_builder<T>(&self, name: T) -> trace::SpanBuilder
-    where
-        T: Into<Cow<'static, str>>,
-    {
-        trace::SpanBuilder::from_name(name)
-    }
 
     /// Create a span from a `SpanBuilder`
     fn build_with_context(&self, builder: trace::SpanBuilder, parent_cx: &Context) -> Self::Span {
@@ -274,14 +273,6 @@ impl trace::Tracer for BoxedTracer {
 pub trait ObjectSafeTracer {
     /// Returns a trait object so the underlying implementation can be swapped
     /// out at runtime.
-    fn start_with_context_boxed(
-        &self,
-        name: Cow<'static, str>,
-        parent_cx: &Context,
-    ) -> Box<dyn ObjectSafeSpan + Send + Sync>;
-
-    /// Returns a trait object so the underlying implementation can be swapped
-    /// out at runtime.
     fn build_with_context_boxed(
         &self,
         builder: trace::SpanBuilder,
@@ -294,16 +285,6 @@ where
     S: trace::Span + Send + Sync + 'static,
     T: trace::Tracer<Span = S>,
 {
-    /// Returns a trait object so the underlying implementation can be swapped
-    /// out at runtime.
-    fn start_with_context_boxed(
-        &self,
-        name: Cow<'static, str>,
-        parent_cx: &Context,
-    ) -> Box<dyn ObjectSafeSpan + Send + Sync> {
-        Box::new(self.start_with_context(name, parent_cx))
-    }
-
     /// Returns a trait object so the underlying implementation can be swapped
     /// out at runtime.
     fn build_with_context_boxed(
@@ -323,15 +304,7 @@ where
 pub trait ObjectSafeTracerProvider {
     /// Creates a versioned named tracer instance that is a trait object through the underlying
     /// `TracerProvider`.
-    fn versioned_tracer_boxed(
-        &self,
-        name: Cow<'static, str>,
-        version: Option<&'static str>,
-        schema_url: Option<&'static str>,
-    ) -> Box<dyn ObjectSafeTracer + Send + Sync>;
-
-    /// Force flush all remaining spans in span processors and return results.
-    fn force_flush(&self) -> Vec<TraceResult<()>>;
+    fn boxed_tracer(&self, scope: InstrumentationScope) -> Box<dyn ObjectSafeTracer + Send + Sync>;
 }
 
 impl<S, T, P> ObjectSafeTracerProvider for P
@@ -341,17 +314,8 @@ where
     P: trace::TracerProvider<Tracer = T>,
 {
     /// Return a versioned boxed tracer
-    fn versioned_tracer_boxed(
-        &self,
-        name: Cow<'static, str>,
-        version: Option<&'static str>,
-        schema_url: Option<&'static str>,
-    ) -> Box<dyn ObjectSafeTracer + Send + Sync> {
-        Box::new(self.versioned_tracer(name, version, schema_url))
-    }
-
-    fn force_flush(&self) -> Vec<TraceResult<()>> {
-        self.force_flush()
+    fn boxed_tracer(&self, scope: InstrumentationScope) -> Box<dyn ObjectSafeTracer + Send + Sync> {
+        Box::new(self.tracer_with_scope(scope))
     }
 }
 
@@ -388,28 +352,19 @@ impl GlobalTracerProvider {
 impl trace::TracerProvider for GlobalTracerProvider {
     type Tracer = BoxedTracer;
 
-    /// Create a versioned tracer using the global provider.
-    fn versioned_tracer(
-        &self,
-        name: impl Into<Cow<'static, str>>,
-        version: Option<&'static str>,
-        schema_url: Option<&'static str>,
-    ) -> Self::Tracer {
-        BoxedTracer(
-            self.provider
-                .versioned_tracer_boxed(name.into(), version, schema_url),
-        )
-    }
-
-    /// Force flush all remaining spans in span processors and return results.
-    fn force_flush(&self) -> Vec<TraceResult<()>> {
-        self.provider.force_flush()
+    /// Create a tracer using the global provider.
+    fn tracer_with_scope(&self, scope: InstrumentationScope) -> Self::Tracer {
+        BoxedTracer(self.provider.boxed_tracer(scope))
     }
 }
 
-lazy_static::lazy_static! {
-    /// The global `Tracer` provider singleton.
-    static ref GLOBAL_TRACER_PROVIDER: RwLock<GlobalTracerProvider> = RwLock::new(GlobalTracerProvider::new(trace::noop::NoopTracerProvider::new()));
+/// The global `Tracer` provider singleton.
+static GLOBAL_TRACER_PROVIDER: OnceLock<RwLock<GlobalTracerProvider>> = OnceLock::new();
+
+#[inline]
+fn global_tracer_provider() -> &'static RwLock<GlobalTracerProvider> {
+    GLOBAL_TRACER_PROVIDER
+        .get_or_init(|| RwLock::new(GlobalTracerProvider::new(NoopTracerProvider::new())))
 }
 
 /// Returns an instance of the currently configured global [`TracerProvider`] through
@@ -418,7 +373,7 @@ lazy_static::lazy_static! {
 /// [`TracerProvider`]: crate::trace::TracerProvider
 /// [`GlobalTracerProvider`]: crate::global::GlobalTracerProvider
 pub fn tracer_provider() -> GlobalTracerProvider {
-    GLOBAL_TRACER_PROVIDER
+    global_tracer_provider()
         .read()
         .expect("GLOBAL_TRACER_PROVIDER RwLock poisoned")
         .clone()
@@ -435,11 +390,39 @@ pub fn tracer(name: impl Into<Cow<'static, str>>) -> BoxedTracer {
     tracer_provider().tracer(name.into())
 }
 
+/// Creates a [`Tracer`] with the given instrumentation scope
+/// via the configured [`GlobalTracerProvider`].
+///
+/// This is a simpler alternative to `global::tracer_provider().tracer_with_scope(...)`
+///
+/// # Example
+///
+/// ```
+/// use std::sync::Arc;
+/// use opentelemetry::global::tracer_with_scope;
+/// use opentelemetry::InstrumentationScope;
+/// use opentelemetry::KeyValue;
+///
+/// let scope = InstrumentationScope::builder("io.opentelemetry")
+///     .with_version("0.17")
+///     .with_schema_url("https://opentelemetry.io/schema/1.2.0")
+///     .with_attributes(vec![(KeyValue::new("key", "value"))])
+///     .build();
+///
+/// let tracer = tracer_with_scope(scope);
+/// ```
+///
+/// [`Tracer`]: crate::trace::Tracer
+pub fn tracer_with_scope(scope: InstrumentationScope) -> BoxedTracer {
+    tracer_provider().tracer_with_scope(scope)
+}
+
 /// Sets the given [`TracerProvider`] instance as the current global provider.
 ///
 /// It returns the [`TracerProvider`] instance that was previously mounted as global provider
 /// (e.g. [`NoopTracerProvider`] if a provider had not been set before).
 ///
+/// Libraries should NOT call this function. It is intended for applications/executables.
 /// [`TracerProvider`]: crate::trace::TracerProvider
 pub fn set_tracer_provider<P, T, S>(new_provider: P) -> GlobalTracerProvider
 where
@@ -447,208 +430,11 @@ where
     T: trace::Tracer<Span = S> + Send + Sync + 'static,
     P: trace::TracerProvider<Tracer = T> + Send + Sync + 'static,
 {
-    let mut tracer_provider = GLOBAL_TRACER_PROVIDER
+    let mut tracer_provider = global_tracer_provider()
         .write()
         .expect("GLOBAL_TRACER_PROVIDER RwLock poisoned");
     mem::replace(
         &mut *tracer_provider,
         GlobalTracerProvider::new(new_provider),
     )
-}
-
-/// Shut down the current tracer provider. This will invoke the shutdown method on all span processors.
-/// span processors should export remaining spans before return
-pub fn shutdown_tracer_provider() {
-    let mut tracer_provider = GLOBAL_TRACER_PROVIDER
-        .write()
-        .expect("GLOBAL_TRACER_PROVIDER RwLock poisoned");
-
-    let _ = mem::replace(
-        &mut *tracer_provider,
-        GlobalTracerProvider::new(NoopTracerProvider::new()),
-    );
-}
-
-/// Force flush all remaining spans in span processors.
-///
-/// Use the [`global::handle_error`] to handle errors happened during force flush.
-///
-/// [`global::handle_error`]: crate::global::handle_error
-pub fn force_flush_tracer_provider() {
-    let tracer_provider = GLOBAL_TRACER_PROVIDER
-        .write()
-        .expect("GLOBAL_TRACER_PROVIDER RwLock poisoned");
-
-    let results = trace::TracerProvider::force_flush(&*tracer_provider);
-    for result in results {
-        if let Err(err) = result {
-            handle_error(err)
-        }
-    }
-}
-
-#[cfg(test)]
-// Note that all tests here should be marked as ignore so that it won't be picked up by default We
-// need to run those tests one by one as the GlobalTracerProvider is a shared object between
-// threads Use cargo test -- --ignored --test-threads=1 to run those tests.
-mod tests {
-    use super::*;
-    #[cfg(any(feature = "rt-tokio", feature = "rt-tokio-current-thread"))]
-    use crate::runtime;
-    #[cfg(any(feature = "rt-tokio", feature = "rt-tokio-current-thread"))]
-    use crate::sdk::trace::TraceRuntime;
-    #[cfg(any(feature = "rt-tokio", feature = "rt-tokio-current-thread"))]
-    use crate::trace::Tracer;
-    use std::{fmt::Debug, io::Write, sync::Mutex};
-
-    #[derive(Debug)]
-    struct AssertWriter {
-        buf: Arc<Mutex<Vec<u8>>>,
-    }
-
-    #[cfg(any(feature = "rt-tokio", feature = "rt-tokio-current-thread"))]
-    impl AssertWriter {
-        fn new() -> AssertWriter {
-            AssertWriter {
-                buf: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn len(&self) -> usize {
-            self.buf
-                .lock()
-                .expect("cannot acquire the lock of assert writer")
-                .len()
-        }
-    }
-
-    impl Write for AssertWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let mut buffer = self
-                .buf
-                .lock()
-                .expect("cannot acquire the lock of assert writer");
-            buffer.write(buf)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            let mut buffer = self
-                .buf
-                .lock()
-                .expect("cannot acquire the lock of assert writer");
-            buffer.flush()
-        }
-    }
-
-    impl Clone for AssertWriter {
-        fn clone(&self) -> Self {
-            AssertWriter {
-                buf: self.buf.clone(),
-            }
-        }
-    }
-
-    #[cfg(any(feature = "rt-tokio", feature = "rt-tokio-current-thread"))]
-    fn build_batch_tracer_provider<R: TraceRuntime>(
-        assert_writer: AssertWriter,
-        runtime: R,
-    ) -> crate::sdk::trace::TracerProvider {
-        use crate::sdk::trace::TracerProvider;
-        let exporter = crate::sdk::export::trace::stdout::Exporter::new(assert_writer, true);
-        TracerProvider::builder()
-            .with_batch_exporter(exporter, runtime)
-            .build()
-    }
-
-    #[cfg(any(feature = "rt-tokio", feature = "rt-tokio-current-thread"))]
-    fn build_simple_tracer_provider(
-        assert_writer: AssertWriter,
-    ) -> crate::sdk::trace::TracerProvider {
-        use crate::sdk::trace::TracerProvider;
-        let exporter = crate::sdk::export::trace::stdout::Exporter::new(assert_writer, true);
-        TracerProvider::builder()
-            .with_simple_exporter(exporter)
-            .build()
-    }
-
-    #[cfg(any(feature = "rt-tokio", feature = "rt-tokio-current-thread"))]
-    async fn test_set_provider_in_tokio<R: TraceRuntime>(runtime: R) -> AssertWriter {
-        let buffer = AssertWriter::new();
-        let _ = set_tracer_provider(build_batch_tracer_provider(buffer.clone(), runtime));
-        let tracer = tracer("opentelemetery");
-
-        tracer.in_span("test", |_cx| {});
-
-        buffer
-    }
-
-    // When using `tokio::spawn` to spawn the worker task in batch processor
-    //
-    // multiple -> no shut down -> not export
-    // multiple -> shut down -> export
-    // single -> no shutdown -> not export
-    // single -> shutdown -> hang forever
-
-    // When using |fut| tokio::task::spawn_blocking(|| futures::executor::block_on(fut))
-    // to spawn the worker task in batch processor
-    //
-    // multiple -> no shutdown -> hang forever
-    // multiple -> shut down -> export
-    // single -> shut down -> export
-    // single -> no shutdown -> hang forever
-
-    // Test if the multiple thread tokio runtime could exit successfully when not force flushing spans
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires --test-threads=1"]
-    #[cfg(feature = "rt-tokio")]
-    async fn test_set_provider_multiple_thread_tokio() {
-        let assert_writer = test_set_provider_in_tokio(runtime::Tokio).await;
-        assert_eq!(assert_writer.len(), 0);
-    }
-
-    // Test if the multiple thread tokio runtime could exit successfully when force flushing spans
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires --test-threads=1"]
-    #[cfg(feature = "rt-tokio")]
-    async fn test_set_provider_multiple_thread_tokio_shutdown() {
-        let assert_writer = test_set_provider_in_tokio(runtime::Tokio).await;
-        shutdown_tracer_provider();
-        assert!(assert_writer.len() > 0);
-    }
-
-    // Test use simple processor in single thread tokio runtime.
-    // Expected to see the spans being exported to buffer
-    #[tokio::test]
-    #[ignore = "requires --test-threads=1"]
-    #[cfg(feature = "rt-tokio")]
-    async fn test_set_provider_single_thread_tokio_with_simple_processor() {
-        let assert_writer = AssertWriter::new();
-        let _ = set_tracer_provider(build_simple_tracer_provider(assert_writer.clone()));
-        let tracer = tracer("opentelemetry");
-
-        tracer.in_span("test", |_cx| {});
-
-        shutdown_tracer_provider();
-
-        assert!(assert_writer.len() > 0);
-    }
-
-    // Test if the single thread tokio runtime could exit successfully when not force flushing spans
-    #[tokio::test]
-    #[ignore = "requires --test-threads=1"]
-    #[cfg(feature = "rt-tokio-current-thread")]
-    async fn test_set_provider_single_thread_tokio() {
-        let assert_writer = test_set_provider_in_tokio(runtime::TokioCurrentThread).await;
-        assert_eq!(assert_writer.len(), 0)
-    }
-
-    // Test if the single thread tokio runtime could exit successfully when force flushing spans.
-    #[tokio::test]
-    #[ignore = "requires --test-threads=1"]
-    #[cfg(feature = "rt-tokio-current-thread")]
-    async fn test_set_provider_single_thread_tokio_shutdown() {
-        let assert_writer = test_set_provider_in_tokio(runtime::TokioCurrentThread).await;
-        shutdown_tracer_provider();
-        assert!(assert_writer.len() > 0);
-    }
 }

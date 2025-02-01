@@ -1,53 +1,81 @@
-//! # OpenTelemetry Prometheus Exporter
+//! An OpenTelemetry exporter for [Prometheus] metrics.
 //!
-//! ### Prometheus Exporter Example
+//! <div class="warning"> The development of prometheus exporter has halt until the Opentelemetry metrics API and SDK reaches 1.0. Current
+//! implementation is based on Opentelemetry API and SDK 0.23.</div>
 //!
-//! ```rust
-//! use opentelemetry::{global, KeyValue, sdk::Resource};
-//! use opentelemetry_prometheus::PrometheusExporter;
-//! use prometheus::{TextEncoder, Encoder};
+//! [Prometheus]: https://prometheus.io
 //!
-//! fn init_meter() -> PrometheusExporter {
-//!     opentelemetry_prometheus::exporter()
-//!         .with_resource(Resource::new(vec![KeyValue::new("R", "V")]))
-//!         .init()
-//! }
+//! ```
+//! use opentelemetry::{metrics::MeterProvider, KeyValue};
+//! use opentelemetry_sdk::metrics::SdkMeterProvider;
+//! use prometheus::{Encoder, TextEncoder};
 //!
-//! let exporter = init_meter();
-//! let meter = global::meter("my-app");
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!
+//! // create a new prometheus registry
+//! let registry = prometheus::Registry::new();
+//!
+//! // configure OpenTelemetry to use this registry
+//! let exporter = opentelemetry_prometheus::exporter()
+//!     .with_registry(registry.clone())
+//!     .build()?;
+//!
+//! // set up a meter to create instruments
+//! let provider = SdkMeterProvider::builder().with_reader(exporter).build();
+//! let meter = provider.meter("my-app");
 //!
 //! // Use two instruments
 //! let counter = meter
 //!     .u64_counter("a.counter")
 //!     .with_description("Counts things")
-//!     .init();
-//! let recorder = meter
-//!     .i64_value_recorder("a.value_recorder")
+//!     .build();
+//! let histogram = meter
+//!     .u64_histogram("a.histogram")
 //!     .with_description("Records values")
-//!     .init();
+//!     .build();
 //!
 //! counter.add(100, &[KeyValue::new("key", "value")]);
-//! recorder.record(100, &[KeyValue::new("key", "value")]);
+//! histogram.record(100, &[KeyValue::new("key", "value")]);
 //!
 //! // Encode data as text or protobuf
 //! let encoder = TextEncoder::new();
-//! let metric_families = exporter.registry().gather();
+//! let metric_families = registry.gather();
 //! let mut result = Vec::new();
-//! encoder.encode(&metric_families, &mut result);
+//! encoder.encode(&metric_families, &mut result)?;
 //!
 //! // result now contains encoded metrics:
 //! //
-//! // # HELP a_counter Counts things
-//! // # TYPE a_counter counter
-//! // a_counter{R="V",key="value"} 100
-//! // # HELP a_value_recorder Records values
-//! // # TYPE a_value_recorder histogram
-//! // a_value_recorder_bucket{R="V",key="value",le="0.5"} 0
-//! // a_value_recorder_bucket{R="V",key="value",le="0.9"} 0
-//! // a_value_recorder_bucket{R="V",key="value",le="0.99"} 0
-//! // a_value_recorder_bucket{R="V",key="value",le="+Inf"} 1
-//! // a_value_recorder_sum{R="V",key="value"} 100
-//! // a_value_recorder_count{R="V",key="value"} 1
+//! // # HELP a_counter_total Counts things
+//! // # TYPE a_counter_total counter
+//! // a_counter_total{key="value",otel_scope_name="my-app"} 100
+//! // # HELP a_histogram Records values
+//! // # TYPE a_histogram histogram
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="0"} 0
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="5"} 0
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="10"} 0
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="25"} 0
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="50"} 0
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="75"} 0
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="100"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="250"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="500"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="750"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="1000"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="2500"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="5000"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="7500"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="10000"} 1
+//! // a_histogram_bucket{key="value",otel_scope_name="my-app",le="+Inf"} 1
+//! // a_histogram_sum{key="value",otel_scope_name="my-app"} 100
+//! // a_histogram_count{key="value",otel_scope_name="my-app"} 1
+//! // # HELP otel_scope_info Instrumentation Scope metadata
+//! // # TYPE otel_scope_info gauge
+//! // otel_scope_info{otel_scope_name="my-app"} 1
+//! // # HELP target_info Target metadata
+//! // # TYPE target_info gauge
+//! // target_info{service_name="unknown_service"} 1
+//! # Ok(())
+//! # }
 //! ```
 #![warn(
     future_incompatible,
@@ -58,554 +86,553 @@
     unreachable_pub,
     unused
 )]
-#![cfg_attr(docsrs, feature(doc_cfg), deny(rustdoc::broken_intra_doc_links))]
+#![cfg_attr(
+    docsrs,
+    feature(doc_cfg, doc_auto_cfg),
+    deny(rustdoc::broken_intra_doc_links)
+)]
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/main/assets/logo.svg"
 )]
 #![cfg_attr(test, deny(warnings))]
 
-#[cfg(feature = "prometheus-encoding")]
-pub use prometheus::{Encoder, TextEncoder};
-
-use opentelemetry::global;
-use opentelemetry::sdk::{
-    export::metrics::{
-        AggregatorSelector, CheckpointSet, ExportKindSelector, Histogram, LastValue, Record, Sum,
-    },
+use once_cell::sync::{Lazy, OnceCell};
+use opentelemetry::{otel_error, otel_warn, InstrumentationScope, Key, Value};
+use opentelemetry_sdk::{
     metrics::{
-        aggregators::{HistogramAggregator, LastValueAggregator, SumAggregator},
-        controllers,
-        selectors::simple::Selector,
-        PullController,
+        data::{self, ResourceMetrics},
+        reader::MetricReader,
+        InstrumentKind, ManualReader, MetricResult, Pipeline, Temporality,
     },
     Resource,
 };
-use opentelemetry::{
-    attributes,
-    metrics::{registry::RegistryMeterProvider, MetricsError, NumberKind},
-    Key, Value,
+use prometheus::{
+    core::Desc,
+    proto::{LabelPair, MetricFamily, MetricType},
 };
-use std::env;
-use std::num::ParseIntError;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    any::TypeId,
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex},
+};
+use std::{fmt, sync::Weak};
 
-mod sanitize;
+const TARGET_INFO_NAME: &str = "target_info";
+const TARGET_INFO_DESCRIPTION: &str = "Target metadata";
 
-use sanitize::sanitize;
+const SCOPE_INFO_METRIC_NAME: &str = "otel_scope_info";
+const SCOPE_INFO_DESCRIPTION: &str = "Instrumentation Scope metadata";
 
-/// Cache disabled by default.
-const DEFAULT_CACHE_PERIOD: Duration = Duration::from_secs(0);
+const SCOPE_INFO_KEYS: [&str; 2] = ["otel_scope_name", "otel_scope_version"];
 
-const EXPORT_KIND_SELECTOR: ExportKindSelector = ExportKindSelector::Cumulative;
+// prometheus counters MUST have a _total suffix by default:
+// https://github.com/open-telemetry/opentelemetry-specification/blob/v1.20.0/specification/compatibility/prometheus_and_openmetrics.md
+const COUNTER_SUFFIX: &str = "_total";
 
-/// Default host used by the Prometheus Exporter when env variable not found
-const DEFAULT_EXPORTER_HOST: &str = "0.0.0.0";
+mod config;
+mod resource_selector;
+mod utils;
 
-/// Default port used by the Prometheus Exporter when env variable not found
-const DEFAULT_EXPORTER_PORT: u16 = 9464;
+pub use config::ExporterBuilder;
+pub use resource_selector::ResourceSelector;
 
-/// The hostname for the Promtheus Exporter
-const ENV_EXPORTER_HOST: &str = "OTEL_EXPORTER_PROMETHEUS_HOST";
-
-/// The port for the Prometheus Exporter
-const ENV_EXPORTER_PORT: &str = "OTEL_EXPORTER_PROMETHEUS_PORT";
-
-/// Create a new prometheus exporter builder.
+/// Creates a builder to configure a [PrometheusExporter]
 pub fn exporter() -> ExporterBuilder {
     ExporterBuilder::default()
 }
 
-/// Configuration for the prometheus exporter.
+/// Prometheus metrics exporter
 #[derive(Debug)]
-pub struct ExporterBuilder {
-    /// The OpenTelemetry `Resource` associated with all Meters
-    /// created by the pull controller.
-    resource: Option<Resource>,
-
-    /// The period which a recently-computed result will be returned without
-    /// gathering metric data again.
-    ///
-    /// If the period is zero, caching of the result is disabled, which is the
-    /// prometheus default.
-    cache_period: Option<Duration>,
-
-    /// The default summary quantiles to use. Use nil to specify the system-default
-    /// summary quantiles.
-    default_summary_quantiles: Option<Vec<f64>>,
-
-    /// Defines the default histogram bucket boundaries.
-    default_histogram_boundaries: Option<Vec<f64>>,
-
-    /// The prometheus registry that will be used to register instruments.
-    ///
-    /// If not set a new empty `Registry` is created.
-    registry: Option<prometheus::Registry>,
-
-    /// The host used by the prometheus exporter
-    ///
-    /// If not set it will be defaulted to all addresses "0.0.0.0"
-    host: Option<String>,
-
-    /// The port used by the prometheus exporter
-    ///
-    /// If not set it will be defaulted to port 9464
-    port: Option<u16>,
-
-    /// The aggregator selector used by the prometheus exporter.
-    aggegator_selector: Option<Box<dyn AggregatorSelector + Send + Sync>>,
-}
-
-impl Default for ExporterBuilder {
-    fn default() -> Self {
-        let port: Option<u16> = match env::var(ENV_EXPORTER_PORT) {
-            Err(_) => None,
-            Ok(p_str) => p_str
-                .parse()
-                .map_err(|err: ParseIntError| {
-                    let err_msg = format!(
-                        "Unable to parse environment variable {}=\"{}\" - {}. Falling back to default port {}. ",
-                        ENV_EXPORTER_PORT, p_str, err, DEFAULT_EXPORTER_PORT
-                    );
-                    global::handle_error(global::Error::Other(err_msg));
-                    err
-                })
-                .ok(),
-        };
-
-        ExporterBuilder {
-            resource: None,
-            cache_period: None,
-            default_histogram_boundaries: None,
-            default_summary_quantiles: None,
-            registry: None,
-            host: env::var(ENV_EXPORTER_HOST).ok().filter(|s| !s.is_empty()),
-            port,
-            aggegator_selector: None,
-        }
-    }
-}
-
-impl ExporterBuilder {
-    /// Set the resource to be associated with all `Meter`s for this exporter
-    pub fn with_resource(self, resource: Resource) -> Self {
-        ExporterBuilder {
-            resource: Some(resource),
-            ..self
-        }
-    }
-
-    /// Set the period which a recently-computed result will be returned without
-    /// gathering metric data again.
-    ///
-    /// If the period is zero, caching of the result is disabled (default).
-    pub fn with_cache_period(self, period: Duration) -> Self {
-        ExporterBuilder {
-            cache_period: Some(period),
-            ..self
-        }
-    }
-
-    /// Set the default summary quantiles to be used by exported prometheus histograms
-    pub fn with_default_summary_quantiles(self, quantiles: Vec<f64>) -> Self {
-        ExporterBuilder {
-            default_summary_quantiles: Some(quantiles),
-            ..self
-        }
-    }
-
-    /// Set the default boundaries to be used by exported prometheus histograms
-    pub fn with_default_histogram_boundaries(self, boundaries: Vec<f64>) -> Self {
-        ExporterBuilder {
-            default_histogram_boundaries: Some(boundaries),
-            ..self
-        }
-    }
-
-    /// Set the host for the prometheus exporter
-    pub fn with_host(self, host: String) -> Self {
-        ExporterBuilder {
-            host: Some(host),
-            ..self
-        }
-    }
-
-    /// Set the port for the prometheus exporter
-    pub fn with_port(self, port: u16) -> Self {
-        ExporterBuilder {
-            port: Some(port),
-            ..self
-        }
-    }
-
-    /// Set the prometheus registry to be used by this exporter
-    pub fn with_registry(self, registry: prometheus::Registry) -> Self {
-        ExporterBuilder {
-            registry: Some(registry),
-            ..self
-        }
-    }
-
-    /// Set the aggregation selector for the prometheus exporter
-    pub fn with_aggregator_selector<T>(self, aggregator_selector: T) -> Self
-    where
-        T: AggregatorSelector + Send + Sync + 'static,
-    {
-        ExporterBuilder {
-            aggegator_selector: Some(Box::new(aggregator_selector)),
-            ..self
-        }
-    }
-
-    /// Sets up a complete export pipeline with the recommended setup, using the
-    /// recommended selector and standard processor.
-    pub fn try_init(self) -> Result<PrometheusExporter, MetricsError> {
-        let registry = self.registry.unwrap_or_else(prometheus::Registry::new);
-        // reserved for future use cases
-        let _default_summary_quantiles = self
-            .default_summary_quantiles
-            .unwrap_or_else(|| vec![0.5, 0.9, 0.99]);
-        let default_histogram_boundaries = self
-            .default_histogram_boundaries
-            .unwrap_or_else(|| vec![0.5, 0.9, 0.99]);
-        let selector = self
-            .aggegator_selector
-            .unwrap_or_else(|| Box::new(Selector::Histogram(default_histogram_boundaries)));
-        let mut controller_builder = controllers::pull(selector, Box::new(EXPORT_KIND_SELECTOR))
-            .with_cache_period(self.cache_period.unwrap_or(DEFAULT_CACHE_PERIOD))
-            .with_memory(true);
-        if let Some(resource) = self.resource {
-            controller_builder = controller_builder.with_resource(resource);
-        }
-        let controller = controller_builder.build();
-
-        global::set_meter_provider(controller.provider());
-
-        let host = self
-            .host
-            .unwrap_or_else(|| DEFAULT_EXPORTER_HOST.to_string());
-        let port = self.port.unwrap_or(DEFAULT_EXPORTER_PORT);
-
-        let controller = Arc::new(Mutex::new(controller));
-        let collector = Collector::with_controller(controller.clone());
-        registry
-            .register(Box::new(collector))
-            .map_err(|e| MetricsError::Other(e.to_string()))?;
-
-        Ok(PrometheusExporter {
-            registry,
-            controller,
-            host,
-            port,
-        })
-    }
-
-    /// Sets up a complete export pipeline with the recommended setup, using the
-    /// recommended selector and standard processor.
-    ///
-    /// # Panics
-    ///
-    /// This panics if the exporter cannot be registered in the prometheus registry.
-    pub fn init(self) -> PrometheusExporter {
-        self.try_init().unwrap()
-    }
-}
-
-/// An implementation of `metrics::Exporter` that sends metrics to Prometheus.
-///
-/// This exporter supports Prometheus pulls, as such it does not
-/// implement the export.Exporter interface.
-#[derive(Clone, Debug)]
 pub struct PrometheusExporter {
-    registry: prometheus::Registry,
-    controller: Arc<Mutex<PullController>>,
-    host: String,
-    port: u16,
+    reader: Arc<ManualReader>,
 }
 
-impl PrometheusExporter {
-    #[deprecated(
-        since = "0.9.0",
-        note = "Please use the ExporterBuilder to initialize a PrometheusExporter"
-    )]
-    /// Create a new prometheus exporter
-    pub fn new(
-        registry: prometheus::Registry,
-        controller: PullController,
-        host: String,
-        port: u16,
-    ) -> Result<Self, MetricsError> {
-        let controller = Arc::new(Mutex::new(controller));
-        let collector = Collector::with_controller(controller.clone());
-        registry
-            .register(Box::new(collector))
-            .map_err(|e| MetricsError::Other(e.to_string()))?;
-
-        Ok(PrometheusExporter {
-            registry,
-            controller,
-            host,
-            port,
-        })
+impl MetricReader for PrometheusExporter {
+    fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+        self.reader.register_pipeline(pipeline)
     }
 
-    /// Returns a reference to the current prometheus registry.
-    pub fn registry(&self) -> &prometheus::Registry {
-        &self.registry
+    fn collect(&self, rm: &mut ResourceMetrics) -> MetricResult<()> {
+        self.reader.collect(rm)
     }
 
-    /// Get this exporter's provider.
-    pub fn provider(&self) -> Result<RegistryMeterProvider, MetricsError> {
-        self.controller
-            .lock()
-            .map_err(Into::into)
-            .map(|locked| locked.provider())
+    fn force_flush(&self) -> MetricResult<()> {
+        self.reader.force_flush()
     }
 
-    /// Get the exporters host for prometheus.
-    pub fn host(&self) -> &str {
-        self.host.as_str()
+    fn shutdown(&self) -> MetricResult<()> {
+        self.reader.shutdown()
     }
 
-    /// Get the exporters port for prometheus.
-    pub fn port(&self) -> u16 {
-        self.port
+    /// Note: Prometheus only supports cumulative temporality, so this will always be
+    /// [Temporality::Cumulative].
+    fn temporality(&self, _kind: InstrumentKind) -> Temporality {
+        Temporality::Cumulative
     }
 }
 
-#[derive(Debug)]
 struct Collector {
-    controller: Arc<Mutex<PullController>>,
+    reader: Arc<ManualReader>,
+    disable_target_info: bool,
+    without_units: bool,
+    without_counter_suffixes: bool,
+    disable_scope_info: bool,
+    create_target_info_once: OnceCell<MetricFamily>,
+    resource_labels_once: OnceCell<Vec<LabelPair>>,
+    namespace: Option<String>,
+    inner: Mutex<CollectorInner>,
+    resource_selector: ResourceSelector,
 }
+
+#[derive(Default)]
+struct CollectorInner {
+    scope_infos: HashMap<InstrumentationScope, MetricFamily>,
+    metric_families: HashMap<String, MetricFamily>,
+}
+
+// TODO: Remove lazy and switch to pattern matching once `TypeId` is stable in
+// const context: https://github.com/rust-lang/rust/issues/77125
+static HISTOGRAM_TYPES: Lazy<[TypeId; 3]> = Lazy::new(|| {
+    [
+        TypeId::of::<data::Histogram<i64>>(),
+        TypeId::of::<data::Histogram<u64>>(),
+        TypeId::of::<data::Histogram<f64>>(),
+    ]
+});
+static SUM_TYPES: Lazy<[TypeId; 3]> = Lazy::new(|| {
+    [
+        TypeId::of::<data::Sum<i64>>(),
+        TypeId::of::<data::Sum<u64>>(),
+        TypeId::of::<data::Sum<f64>>(),
+    ]
+});
+static GAUGE_TYPES: Lazy<[TypeId; 3]> = Lazy::new(|| {
+    [
+        TypeId::of::<data::Gauge<i64>>(),
+        TypeId::of::<data::Gauge<u64>>(),
+        TypeId::of::<data::Gauge<f64>>(),
+    ]
+});
 
 impl Collector {
-    fn with_controller(controller: Arc<Mutex<PullController>>) -> Self {
-        Collector { controller }
+    fn metric_type_and_name(&self, m: &data::Metric) -> Option<(MetricType, Cow<'static, str>)> {
+        let mut name = self.get_name(m);
+
+        let data = m.data.as_any();
+        let type_id = data.type_id();
+
+        if HISTOGRAM_TYPES.contains(&type_id) {
+            Some((MetricType::HISTOGRAM, name))
+        } else if GAUGE_TYPES.contains(&type_id) {
+            Some((MetricType::GAUGE, name))
+        } else if SUM_TYPES.contains(&type_id) {
+            let is_monotonic = if let Some(v) = data.downcast_ref::<data::Sum<i64>>() {
+                v.is_monotonic
+            } else if let Some(v) = data.downcast_ref::<data::Sum<u64>>() {
+                v.is_monotonic
+            } else if let Some(v) = data.downcast_ref::<data::Sum<f64>>() {
+                v.is_monotonic
+            } else {
+                false
+            };
+
+            if is_monotonic {
+                if !self.without_counter_suffixes {
+                    name = format!("{name}{COUNTER_SUFFIX}").into();
+                }
+                Some((MetricType::COUNTER, name))
+            } else {
+                Some((MetricType::GAUGE, name))
+            }
+        } else {
+            None
+        }
+    }
+
+    fn get_name(&self, m: &data::Metric) -> Cow<'static, str> {
+        let name = utils::sanitize_name(&m.name);
+        let unit_suffixes = if self.without_units {
+            None
+        } else {
+            utils::get_unit_suffixes(&m.unit)
+        };
+        match (&self.namespace, unit_suffixes) {
+            (Some(namespace), Some(suffix)) => Cow::Owned(format!("{namespace}{name}_{suffix}")),
+            (Some(namespace), None) => Cow::Owned(format!("{namespace}{name}")),
+            (None, Some(suffix)) => Cow::Owned(format!("{name}_{suffix}")),
+            (None, None) => name,
+        }
     }
 }
 
 impl prometheus::core::Collector for Collector {
-    /// Unused as descriptors are dynamically registered.
-    fn desc(&self) -> Vec<&prometheus::core::Desc> {
+    fn desc(&self) -> Vec<&Desc> {
         Vec::new()
     }
 
-    /// Collect all otel metrics and convert to prometheus metrics.
-    fn collect(&self) -> Vec<prometheus::proto::MetricFamily> {
-        if let Ok(mut controller) = self.controller.lock() {
-            let mut metrics = Vec::new();
-
-            if let Err(err) = controller.collect() {
-                global::handle_error(err);
-                return metrics;
+    fn collect(&self) -> Vec<MetricFamily> {
+        let mut inner = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                otel_error!(
+                    name: "MetricScrapeFailed",
+                    message = err.to_string(),
+                );
+                return Vec::new();
             }
+        };
 
-            if let Err(err) = controller.try_for_each(&EXPORT_KIND_SELECTOR, &mut |record| {
-                let agg = record.aggregator().ok_or(MetricsError::NoDataCollected)?;
-                let number_kind = record.descriptor().number_kind();
-                let instrument_kind = record.descriptor().instrument_kind();
+        let mut metrics = ResourceMetrics {
+            resource: Resource::empty(),
+            scope_metrics: vec![],
+        };
+        if let Err(err) = self.reader.collect(&mut metrics) {
+            otel_error!(
+                name: "MetricScrapeFailed",
+                message = err.to_string(),
+            );
+            return vec![];
+        }
+        let mut res = Vec::with_capacity(metrics.scope_metrics.len() + 1);
 
-                let desc = get_metric_desc(record);
-                let labels = get_metric_labels(record);
+        let target_info = self.create_target_info_once.get_or_init(|| {
+            // Resource should be immutable, we don't need to compute again
+            create_info_metric(TARGET_INFO_NAME, TARGET_INFO_DESCRIPTION, &metrics.resource)
+        });
 
-                if let Some(hist) = agg.as_any().downcast_ref::<HistogramAggregator>() {
-                    metrics.push(build_histogram(hist, number_kind, desc, labels)?);
-                } else if let Some(sum) = agg.as_any().downcast_ref::<SumAggregator>() {
-                    let counter = if instrument_kind.monotonic() {
-                        build_monotonic_counter(sum, number_kind, desc, labels)?
-                    } else {
-                        build_non_monotonic_counter(sum, number_kind, desc, labels)?
-                    };
+        if !self.disable_target_info && !metrics.resource.is_empty() {
+            res.push(target_info.clone())
+        }
 
-                    metrics.push(counter);
-                } else if let Some(last) = agg.as_any().downcast_ref::<LastValueAggregator>() {
-                    metrics.push(build_last_value(last, number_kind, desc, labels)?);
+        let resource_labels = self
+            .resource_labels_once
+            .get_or_init(|| self.resource_selector.select(&metrics.resource));
+
+        for scope_metrics in metrics.scope_metrics {
+            let scope_labels = if !self.disable_scope_info {
+                if scope_metrics.scope.attributes().count() > 0 {
+                    let scope_info = inner
+                        .scope_infos
+                        .entry(scope_metrics.scope.clone())
+                        .or_insert_with_key(create_scope_info_metric);
+                    res.push(scope_info.clone());
                 }
 
-                Ok(())
-            }) {
-                global::handle_error(err);
+                let mut labels =
+                    Vec::with_capacity(1 + scope_metrics.scope.version().is_some() as usize);
+                let mut name = LabelPair::new();
+                name.set_name(SCOPE_INFO_KEYS[0].into());
+                name.set_value(scope_metrics.scope.name().to_string());
+                labels.push(name);
+                if let Some(version) = &scope_metrics.scope.version() {
+                    let mut l_version = LabelPair::new();
+                    l_version.set_name(SCOPE_INFO_KEYS[1].into());
+                    l_version.set_value(version.to_string());
+                    labels.push(l_version);
+                }
+
+                if !resource_labels.is_empty() {
+                    labels.extend(resource_labels.iter().cloned());
+                }
+                labels
+            } else {
+                Vec::new()
+            };
+
+            for metrics in scope_metrics.metrics {
+                let (metric_type, name) = match self.metric_type_and_name(&metrics) {
+                    Some((metric_type, name)) => (metric_type, name),
+                    _ => continue,
+                };
+
+                let mfs = &mut inner.metric_families;
+                let (drop, help) = validate_metrics(&name, &metrics.description, metric_type, mfs);
+                if drop {
+                    continue;
+                }
+
+                let description = help.unwrap_or_else(|| metrics.description.into());
+                let data = metrics.data.as_any();
+
+                if let Some(hist) = data.downcast_ref::<data::Histogram<i64>>() {
+                    add_histogram_metric(&mut res, hist, description, &scope_labels, name);
+                } else if let Some(hist) = data.downcast_ref::<data::Histogram<u64>>() {
+                    add_histogram_metric(&mut res, hist, description, &scope_labels, name);
+                } else if let Some(hist) = data.downcast_ref::<data::Histogram<f64>>() {
+                    add_histogram_metric(&mut res, hist, description, &scope_labels, name);
+                } else if let Some(sum) = data.downcast_ref::<data::Sum<u64>>() {
+                    add_sum_metric(&mut res, sum, description, &scope_labels, name);
+                } else if let Some(sum) = data.downcast_ref::<data::Sum<i64>>() {
+                    add_sum_metric(&mut res, sum, description, &scope_labels, name);
+                } else if let Some(sum) = data.downcast_ref::<data::Sum<f64>>() {
+                    add_sum_metric(&mut res, sum, description, &scope_labels, name);
+                } else if let Some(g) = data.downcast_ref::<data::Gauge<u64>>() {
+                    add_gauge_metric(&mut res, g, description, &scope_labels, name);
+                } else if let Some(g) = data.downcast_ref::<data::Gauge<i64>>() {
+                    add_gauge_metric(&mut res, g, description, &scope_labels, name);
+                } else if let Some(g) = data.downcast_ref::<data::Gauge<f64>>() {
+                    add_gauge_metric(&mut res, g, description, &scope_labels, name);
+                }
             }
-
-            metrics
-        } else {
-            Vec::new()
         }
+
+        res
     }
 }
 
-fn build_last_value(
-    lv: &LastValueAggregator,
-    kind: &NumberKind,
-    desc: PrometheusMetricDesc,
-    labels: Vec<prometheus::proto::LabelPair>,
-) -> Result<prometheus::proto::MetricFamily, MetricsError> {
-    let (last_value, _) = lv.last_value()?;
+/// Maps attributes into Prometheus-style label pairs.
+///
+/// It sanitizes invalid characters and handles duplicate keys (due to
+/// sanitization) by sorting and concatenating the values following the spec.
+fn get_attrs(kvs: &mut dyn Iterator<Item = (&Key, &Value)>, extra: &[LabelPair]) -> Vec<LabelPair> {
+    let mut keys_map = BTreeMap::<String, Vec<String>>::new();
+    for (key, value) in kvs {
+        let key = utils::sanitize_prom_kv(key.as_str());
+        keys_map
+            .entry(key)
+            .and_modify(|v| v.push(value.to_string()))
+            .or_insert_with(|| vec![value.to_string()]);
+    }
 
+    let mut res = Vec::with_capacity(keys_map.len() + extra.len());
+
+    for (key, mut values) in keys_map.into_iter() {
+        values.sort_unstable();
+
+        let mut lp = LabelPair::new();
+        lp.set_name(key);
+        lp.set_value(values.join(";"));
+        res.push(lp);
+    }
+
+    if !extra.is_empty() {
+        res.extend(&mut extra.iter().cloned());
+    }
+
+    res
+}
+
+fn validate_metrics(
+    name: &str,
+    description: &str,
+    metric_type: MetricType,
+    mfs: &mut HashMap<String, MetricFamily>,
+) -> (bool, Option<String>) {
+    if let Some(existing) = mfs.get(name) {
+        if existing.get_field_type() != metric_type {
+            otel_warn!(
+                name: "MetricValidationFailed",
+                message = "Instrument type conflict, using existing type definition",
+                metric_type = format!("Instrument {name}, Existing: {:?}, dropped: {:?}", existing.get_field_type(), metric_type).as_str(),
+            );
+            return (true, None);
+        }
+        if existing.get_help() != description {
+            otel_warn!(
+                name: "MetricValidationFailed",
+                message = "Instrument description conflict, using existing",
+                metric_description = format!("Instrument {name}, Existing: {:?}, dropped: {:?}", existing.get_help().to_string(), description.to_string()).as_str(),
+            );
+            return (false, Some(existing.get_help().to_string()));
+        }
+        (false, None)
+    } else {
+        let mut mf = MetricFamily::default();
+        mf.set_name(name.into());
+        mf.set_help(description.to_string());
+        mf.set_field_type(metric_type);
+        mfs.insert(name.to_string(), mf);
+
+        (false, None)
+    }
+}
+
+fn add_histogram_metric<T: Numeric>(
+    res: &mut Vec<MetricFamily>,
+    histogram: &data::Histogram<T>,
+    description: String,
+    extra: &[LabelPair],
+    name: Cow<'static, str>,
+) {
+    // Consider supporting exemplars when `prometheus` crate has the feature
+    // See: https://github.com/tikv/rust-prometheus/issues/393
+
+    for dp in &histogram.data_points {
+        let kvs = get_attrs(
+            &mut dp.attributes.iter().map(|kv| (&kv.key, &kv.value)),
+            extra,
+        );
+        let bounds_len = dp.bounds.len();
+        let (bucket, _) = dp.bounds.iter().enumerate().fold(
+            (Vec::with_capacity(bounds_len), 0),
+            |(mut acc, mut count), (i, bound)| {
+                count += dp.bucket_counts[i];
+
+                let mut b = prometheus::proto::Bucket::default();
+                b.set_upper_bound(*bound);
+                b.set_cumulative_count(count);
+                acc.push(b);
+                (acc, count)
+            },
+        );
+
+        let mut h = prometheus::proto::Histogram::default();
+        h.set_sample_sum(dp.sum.as_f64());
+        h.set_sample_count(dp.count);
+        h.set_bucket(protobuf::RepeatedField::from_vec(bucket));
+        let mut pm = prometheus::proto::Metric::default();
+        pm.set_label(protobuf::RepeatedField::from_vec(kvs));
+        pm.set_histogram(h);
+
+        let mut mf = prometheus::proto::MetricFamily::default();
+        mf.set_name(name.to_string());
+        mf.set_help(description.clone());
+        mf.set_field_type(prometheus::proto::MetricType::HISTOGRAM);
+        mf.set_metric(protobuf::RepeatedField::from_vec(vec![pm]));
+        res.push(mf);
+    }
+}
+
+fn add_sum_metric<T: Numeric>(
+    res: &mut Vec<MetricFamily>,
+    sum: &data::Sum<T>,
+    description: String,
+    extra: &[LabelPair],
+    name: Cow<'static, str>,
+) {
+    let metric_type = if sum.is_monotonic {
+        MetricType::COUNTER
+    } else {
+        MetricType::GAUGE
+    };
+
+    for dp in &sum.data_points {
+        let kvs = get_attrs(
+            &mut dp.attributes.iter().map(|kv| (&kv.key, &kv.value)),
+            extra,
+        );
+
+        let mut pm = prometheus::proto::Metric::default();
+        pm.set_label(protobuf::RepeatedField::from_vec(kvs));
+
+        if sum.is_monotonic {
+            let mut c = prometheus::proto::Counter::default();
+            c.set_value(dp.value.as_f64());
+            pm.set_counter(c);
+        } else {
+            let mut g = prometheus::proto::Gauge::default();
+            g.set_value(dp.value.as_f64());
+            pm.set_gauge(g);
+        }
+
+        let mut mf = prometheus::proto::MetricFamily::default();
+        mf.set_name(name.to_string());
+        mf.set_help(description.clone());
+        mf.set_field_type(metric_type);
+        mf.set_metric(protobuf::RepeatedField::from_vec(vec![pm]));
+        res.push(mf);
+    }
+}
+
+fn add_gauge_metric<T: Numeric>(
+    res: &mut Vec<MetricFamily>,
+    gauge: &data::Gauge<T>,
+    description: String,
+    extra: &[LabelPair],
+    name: Cow<'static, str>,
+) {
+    for dp in &gauge.data_points {
+        let kvs = get_attrs(
+            &mut dp.attributes.iter().map(|kv| (&kv.key, &kv.value)),
+            extra,
+        );
+
+        let mut g = prometheus::proto::Gauge::default();
+        g.set_value(dp.value.as_f64());
+        let mut pm = prometheus::proto::Metric::default();
+        pm.set_label(protobuf::RepeatedField::from_vec(kvs));
+        pm.set_gauge(g);
+
+        let mut mf = prometheus::proto::MetricFamily::default();
+        mf.set_name(name.to_string());
+        mf.set_help(description.to_string());
+        mf.set_field_type(MetricType::GAUGE);
+        mf.set_metric(protobuf::RepeatedField::from_vec(vec![pm]));
+        res.push(mf);
+    }
+}
+
+fn create_info_metric(
+    target_info_name: &str,
+    target_info_description: &str,
+    resource: &Resource,
+) -> MetricFamily {
     let mut g = prometheus::proto::Gauge::default();
-    g.set_value(last_value.to_f64(kind));
+    g.set_value(1.0);
+
+    let mut m = prometheus::proto::Metric::default();
+    m.set_label(protobuf::RepeatedField::from_vec(get_attrs(
+        &mut resource.iter(),
+        &[],
+    )));
+    m.set_gauge(g);
+
+    let mut mf = MetricFamily::default();
+    mf.set_name(target_info_name.into());
+    mf.set_help(target_info_description.into());
+    mf.set_field_type(MetricType::GAUGE);
+    mf.set_metric(protobuf::RepeatedField::from_vec(vec![m]));
+    mf
+}
+
+fn create_scope_info_metric(scope: &InstrumentationScope) -> MetricFamily {
+    let mut g = prometheus::proto::Gauge::default();
+    g.set_value(1.0);
+
+    let mut labels = Vec::with_capacity(1 + scope.version().is_some() as usize);
+    let mut name = LabelPair::new();
+    name.set_name(SCOPE_INFO_KEYS[0].into());
+    name.set_value(scope.name().to_string());
+    labels.push(name);
+    if let Some(version) = &scope.version() {
+        let mut v_label = LabelPair::new();
+        v_label.set_name(SCOPE_INFO_KEYS[1].into());
+        v_label.set_value(version.to_string());
+        labels.push(v_label);
+    }
 
     let mut m = prometheus::proto::Metric::default();
     m.set_label(protobuf::RepeatedField::from_vec(labels));
     m.set_gauge(g);
 
-    let mut mf = prometheus::proto::MetricFamily::default();
-    mf.set_name(desc.name);
-    mf.set_help(desc.help);
-    mf.set_field_type(prometheus::proto::MetricType::GAUGE);
+    let mut mf = MetricFamily::default();
+    mf.set_name(SCOPE_INFO_METRIC_NAME.into());
+    mf.set_help(SCOPE_INFO_DESCRIPTION.into());
+    mf.set_field_type(MetricType::GAUGE);
     mf.set_metric(protobuf::RepeatedField::from_vec(vec![m]));
-
-    Ok(mf)
+    mf
 }
 
-fn build_non_monotonic_counter(
-    sum: &SumAggregator,
-    kind: &NumberKind,
-    desc: PrometheusMetricDesc,
-    labels: Vec<prometheus::proto::LabelPair>,
-) -> Result<prometheus::proto::MetricFamily, MetricsError> {
-    let sum = sum.sum()?;
-
-    let mut g = prometheus::proto::Gauge::default();
-    g.set_value(sum.to_f64(kind));
-
-    let mut m = prometheus::proto::Metric::default();
-    m.set_label(protobuf::RepeatedField::from_vec(labels));
-    m.set_gauge(g);
-
-    let mut mf = prometheus::proto::MetricFamily::default();
-    mf.set_name(desc.name);
-    mf.set_help(desc.help);
-    mf.set_field_type(prometheus::proto::MetricType::GAUGE);
-    mf.set_metric(protobuf::RepeatedField::from_vec(vec![m]));
-
-    Ok(mf)
+trait Numeric: fmt::Debug {
+    // lossy at large values for u64 and i64 but prometheus only handles floats
+    fn as_f64(&self) -> f64;
 }
 
-fn build_monotonic_counter(
-    sum: &SumAggregator,
-    kind: &NumberKind,
-    desc: PrometheusMetricDesc,
-    labels: Vec<prometheus::proto::LabelPair>,
-) -> Result<prometheus::proto::MetricFamily, MetricsError> {
-    let sum = sum.sum()?;
-
-    let mut c = prometheus::proto::Counter::default();
-    c.set_value(sum.to_f64(kind));
-
-    let mut m = prometheus::proto::Metric::default();
-    m.set_label(protobuf::RepeatedField::from_vec(labels));
-    m.set_counter(c);
-
-    let mut mf = prometheus::proto::MetricFamily::default();
-    mf.set_name(desc.name);
-    mf.set_help(desc.help);
-    mf.set_field_type(prometheus::proto::MetricType::COUNTER);
-    mf.set_metric(protobuf::RepeatedField::from_vec(vec![m]));
-
-    Ok(mf)
-}
-
-fn build_histogram(
-    hist: &HistogramAggregator,
-    kind: &NumberKind,
-    desc: PrometheusMetricDesc,
-    labels: Vec<prometheus::proto::LabelPair>,
-) -> Result<prometheus::proto::MetricFamily, MetricsError> {
-    let raw_buckets = hist.histogram()?;
-    let sum = hist.sum()?;
-
-    let mut h = prometheus::proto::Histogram::default();
-    h.set_sample_sum(sum.to_f64(kind));
-
-    let mut count = 0;
-    let mut buckets = Vec::with_capacity(raw_buckets.boundaries().len());
-    for (i, upper_bound) in raw_buckets.boundaries().iter().enumerate() {
-        count += raw_buckets.counts()[i] as u64;
-        let mut b = prometheus::proto::Bucket::default();
-        b.set_cumulative_count(count);
-        b.set_upper_bound(*upper_bound);
-        buckets.push(b);
+impl Numeric for u64 {
+    fn as_f64(&self) -> f64 {
+        *self as f64
     }
-    // Include the +inf bucket in the total count.
-    count += raw_buckets.counts()[raw_buckets.counts().len() - 1] as u64;
-    h.set_bucket(protobuf::RepeatedField::from_vec(buckets));
-    h.set_sample_count(count);
-
-    let mut m = prometheus::proto::Metric::default();
-    m.set_label(protobuf::RepeatedField::from_vec(labels));
-    m.set_histogram(h);
-
-    let mut mf = prometheus::proto::MetricFamily::default();
-    mf.set_name(desc.name);
-    mf.set_help(desc.help);
-    mf.set_field_type(prometheus::proto::MetricType::HISTOGRAM);
-    mf.set_metric(protobuf::RepeatedField::from_vec(vec![m]));
-
-    Ok(mf)
 }
 
-fn build_label_pair(key: &Key, value: &Value) -> prometheus::proto::LabelPair {
-    let mut lp = prometheus::proto::LabelPair::new();
-    lp.set_name(sanitize(key.as_str()));
-    lp.set_value(value.to_string());
-
-    lp
+impl Numeric for i64 {
+    fn as_f64(&self) -> f64 {
+        *self as f64
+    }
 }
 
-fn get_metric_labels(record: &Record<'_>) -> Vec<prometheus::proto::LabelPair> {
-    // Duplicate keys are resolved by taking the record label value over
-    // the resource value.
-    let iter = attributes::merge_iters(record.attributes().iter(), record.resource().iter());
-    iter.map(|(key, value)| build_label_pair(key, value))
-        .collect()
-}
-
-struct PrometheusMetricDesc {
-    name: String,
-    help: String,
-}
-
-fn get_metric_desc(record: &Record<'_>) -> PrometheusMetricDesc {
-    let desc = record.descriptor();
-    let name = sanitize(desc.name());
-    let help = desc
-        .description()
-        .cloned()
-        .unwrap_or_else(|| desc.name().to_string());
-    PrometheusMetricDesc { name, help }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::env;
-
-    use super::*;
-
-    #[test]
-    fn test_exporter_builder_default() {
-        env::remove_var(ENV_EXPORTER_HOST);
-        env::remove_var(ENV_EXPORTER_PORT);
-        let exporter = ExporterBuilder::default().init();
-        assert_eq!(exporter.host(), "0.0.0.0");
-        assert_eq!(exporter.port(), 9464);
-
-        env::set_var(ENV_EXPORTER_HOST, "prometheus-test");
-        env::set_var(ENV_EXPORTER_PORT, "9000");
-        let exporter = ExporterBuilder::default().init();
-        assert_eq!(exporter.host(), "prometheus-test");
-        assert_eq!(exporter.port(), 9000);
-
-        env::set_var(ENV_EXPORTER_HOST, "");
-        env::set_var(ENV_EXPORTER_PORT, "");
-        let exporter = ExporterBuilder::default().init();
-        assert_eq!(exporter.host(), "0.0.0.0");
-        assert_eq!(exporter.port(), 9464);
-
-        env::set_var(ENV_EXPORTER_HOST, "");
-        env::set_var(ENV_EXPORTER_PORT, "not_a_number");
-        let exporter = ExporterBuilder::default().init();
-        assert_eq!(exporter.host(), "0.0.0.0");
-        assert_eq!(exporter.port(), 9464);
+impl Numeric for f64 {
+    fn as_f64(&self) -> f64 {
+        *self
     }
 }

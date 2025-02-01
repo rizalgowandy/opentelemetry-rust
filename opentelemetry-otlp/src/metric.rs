@@ -1,360 +1,175 @@
 //! OTEL metric exporter
 //!
-//! Defines a [Exporter] to send metric data to backend via OTEL protocol.
+//! Defines a [MetricExporter] to send metric data to backend via OTLP protocol.
 //!
-//! Currently, OTEL metrics exporter only support GRPC connection via tonic on tokio runtime.
 
-use crate::exporter::{
-    tonic::{TonicConfig, TonicExporterBuilder},
-    ExportConfig,
+#[cfg(any(feature = "http-proto", feature = "http-json", feature = "grpc-tonic"))]
+use crate::HasExportConfig;
+
+#[cfg(any(feature = "http-proto", feature = "http-json"))]
+use crate::{exporter::http::HttpExporterBuilder, HasHttpConfig, HttpExporterBuilderSet};
+
+#[cfg(feature = "grpc-tonic")]
+use crate::{exporter::tonic::TonicExporterBuilder, HasTonicConfig, TonicExporterBuilderSet};
+
+use crate::NoExporterBuilderSet;
+
+use async_trait::async_trait;
+use core::fmt;
+use opentelemetry_sdk::error::ShutdownResult;
+use opentelemetry_sdk::metrics::MetricResult;
+
+use opentelemetry_sdk::metrics::{
+    data::ResourceMetrics, exporter::PushMetricExporter, Temporality,
 };
-#[cfg(feature = "tonic")]
-use crate::proto::collector::metrics::v1::{
-    metrics_service_client::MetricsServiceClient, ExportMetricsServiceRequest,
-};
-use crate::transform::{record_to_metric, sink, CheckpointedMetrics};
-use crate::{Error, OtlpPipeline};
-use futures_util::Stream;
-use opentelemetry::metrics::{Descriptor, Result};
-use opentelemetry::sdk::export::metrics::{AggregatorSelector, ExportKindSelector};
-use opentelemetry::sdk::metrics::{PushController, PushControllerWorker};
-use opentelemetry::sdk::{
-    export::metrics::{CheckpointSet, ExportKind, ExportKindFor, Exporter},
-    metrics::selectors,
-    InstrumentationLibrary, Resource,
-};
-use opentelemetry::{global, KeyValue};
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time;
-use tonic::metadata::KeyAndValueRef;
-#[cfg(feature = "tonic")]
-use tonic::transport::Channel;
-#[cfg(feature = "tonic")]
-use tonic::Request;
 
-impl OtlpPipeline {
-    /// Create a OTLP metrics pipeline.
-    pub fn metrics<SP, SO, I, IO>(
-        self,
-        spawn: SP,
-        interval: I,
-    ) -> OtlpMetricPipeline<selectors::simple::Selector, ExportKindSelector, SP, SO, I, IO>
-    where
-        SP: Fn(PushControllerWorker) -> SO,
-        I: Fn(time::Duration) -> IO,
-    {
-        OtlpMetricPipeline {
-            aggregator_selector: selectors::simple::Selector::Inexpensive,
-            export_selector: ExportKindSelector::Cumulative,
-            spawn,
-            interval,
-            exporter_pipeline: None,
-            resource: None,
-            period: None,
-            timeout: None,
+/// Target to which the exporter is going to send metrics, defaults to https://localhost:4317/v1/metrics.
+/// Learn about the relationship between this constant and default/spans/logs at
+/// <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md#endpoint-urls-for-otlphttp>
+pub const OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT";
+/// Max waiting time for the backend to process each metrics batch, defaults to 10s.
+pub const OTEL_EXPORTER_OTLP_METRICS_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_METRICS_TIMEOUT";
+/// Compression algorithm to use, defaults to none.
+pub const OTEL_EXPORTER_OTLP_METRICS_COMPRESSION: &str = "OTEL_EXPORTER_OTLP_METRICS_COMPRESSION";
+/// Key-value pairs to be used as headers associated with gRPC or HTTP requests
+/// for sending metrics.
+/// Example: `k1=v1,k2=v2`
+/// Note: this is only supported for HTTP.
+pub const OTEL_EXPORTER_OTLP_METRICS_HEADERS: &str = "OTEL_EXPORTER_OTLP_METRICS_HEADERS";
+
+#[derive(Debug, Default, Clone)]
+pub struct MetricExporterBuilder<C> {
+    client: C,
+    temporality: Temporality,
+}
+
+impl MetricExporterBuilder<NoExporterBuilderSet> {
+    pub fn new() -> Self {
+        MetricExporterBuilder::default()
+    }
+}
+
+impl<C> MetricExporterBuilder<C> {
+    #[cfg(feature = "grpc-tonic")]
+    pub fn with_tonic(self) -> MetricExporterBuilder<TonicExporterBuilderSet> {
+        MetricExporterBuilder {
+            client: TonicExporterBuilderSet(TonicExporterBuilder::default()),
+            temporality: self.temporality,
+        }
+    }
+
+    #[cfg(any(feature = "http-proto", feature = "http-json"))]
+    pub fn with_http(self) -> MetricExporterBuilder<HttpExporterBuilderSet> {
+        MetricExporterBuilder {
+            client: HttpExporterBuilderSet(HttpExporterBuilder::default()),
+            temporality: self.temporality,
+        }
+    }
+
+    pub fn with_temporality(self, temporality: Temporality) -> MetricExporterBuilder<C> {
+        MetricExporterBuilder {
+            client: self.client,
+            temporality,
         }
     }
 }
 
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum MetricsExporterBuilder {
-    #[cfg(feature = "tonic")]
-    Tonic(TonicExporterBuilder),
-}
-
-impl MetricsExporterBuilder {
-    /// Build a OTLP metrics exporter with given configuration.
-    fn build_metrics_exporter<ES>(self, export_selector: ES) -> Result<MetricsExporter>
-    where
-        ES: ExportKindFor + Sync + Send + 'static,
-    {
-        match self {
-            #[cfg(feature = "tonic")]
-            MetricsExporterBuilder::Tonic(builder) => Ok(MetricsExporter::new(
-                builder.exporter_config,
-                builder.tonic_config,
-                export_selector,
-            )?),
-        }
+#[cfg(feature = "grpc-tonic")]
+impl MetricExporterBuilder<TonicExporterBuilderSet> {
+    pub fn build(self) -> MetricResult<MetricExporter> {
+        let exporter = self.client.0.build_metrics_exporter(self.temporality)?;
+        opentelemetry::otel_debug!(name: "MetricExporterBuilt");
+        Ok(exporter)
     }
 }
 
-impl From<TonicExporterBuilder> for MetricsExporterBuilder {
-    fn from(exporter: TonicExporterBuilder) -> Self {
-        MetricsExporterBuilder::Tonic(exporter)
+#[cfg(any(feature = "http-proto", feature = "http-json"))]
+impl MetricExporterBuilder<HttpExporterBuilderSet> {
+    pub fn build(self) -> MetricResult<MetricExporter> {
+        let exporter = self.client.0.build_metrics_exporter(self.temporality)?;
+        Ok(exporter)
     }
 }
 
-/// Pipeline to build OTLP metrics exporter
-///
-/// Note that currently the OTLP metrics exporter only supports tonic as it's grpc layer and tokio as
-/// runtime.
-#[derive(Debug)]
-pub struct OtlpMetricPipeline<AS, ES, SP, SO, I, IO>
-where
-    AS: AggregatorSelector + Send + Sync + 'static,
-    ES: ExportKindFor + Send + Sync + Clone + 'static,
-    SP: Fn(PushControllerWorker) -> SO,
-    I: Fn(time::Duration) -> IO,
-{
-    aggregator_selector: AS,
-    export_selector: ES,
-    spawn: SP,
-    interval: I,
-    exporter_pipeline: Option<MetricsExporterBuilder>,
-    resource: Option<Resource>,
-    period: Option<time::Duration>,
-    timeout: Option<time::Duration>,
-}
-
-impl<AS, ES, SP, SO, I, IO, IOI> OtlpMetricPipeline<AS, ES, SP, SO, I, IO>
-where
-    AS: AggregatorSelector + Send + Sync + 'static,
-    ES: ExportKindFor + Send + Sync + Clone + 'static,
-    SP: Fn(PushControllerWorker) -> SO,
-    I: Fn(time::Duration) -> IO,
-    IO: Stream<Item = IOI> + Send + 'static,
-{
-    /// Build with resource key value pairs.
-    pub fn with_resource<T: IntoIterator<Item = R>, R: Into<KeyValue>>(self, resource: T) -> Self {
-        OtlpMetricPipeline {
-            resource: Some(Resource::new(resource.into_iter().map(Into::into))),
-            ..self
-        }
-    }
-
-    /// Build with the exporter
-    pub fn with_exporter<B: Into<MetricsExporterBuilder>>(self, pipeline: B) -> Self {
-        OtlpMetricPipeline {
-            exporter_pipeline: Some(pipeline.into()),
-            ..self
-        }
-    }
-
-    /// Build with the aggregator selector
-    pub fn with_aggregator_selector<T>(
-        self,
-        aggregator_selector: T,
-    ) -> OtlpMetricPipeline<T, ES, SP, SO, I, IO>
-    where
-        T: AggregatorSelector + Send + Sync + 'static,
-    {
-        OtlpMetricPipeline {
-            aggregator_selector,
-            export_selector: self.export_selector,
-            spawn: self.spawn,
-            interval: self.interval,
-            exporter_pipeline: self.exporter_pipeline,
-            resource: self.resource,
-            period: self.period,
-            timeout: self.timeout,
-        }
-    }
-
-    /// Build with spawn function
-    pub fn with_spawn(self, spawn: SP) -> Self {
-        OtlpMetricPipeline { spawn, ..self }
-    }
-
-    /// Build with timeout
-    pub fn with_timeout(self, timeout: time::Duration) -> Self {
-        OtlpMetricPipeline {
-            timeout: Some(timeout),
-            ..self
-        }
-    }
-
-    /// Build with period, your metrics will be exported with this period
-    pub fn with_period(self, period: time::Duration) -> Self {
-        OtlpMetricPipeline {
-            period: Some(period),
-            ..self
-        }
-    }
-
-    /// Build with interval function
-    pub fn with_interval(self, interval: I) -> Self {
-        OtlpMetricPipeline { interval, ..self }
-    }
-
-    /// Build with export kind selector
-    pub fn with_export_kind<E>(self, export_selector: E) -> OtlpMetricPipeline<AS, E, SP, SO, I, IO>
-    where
-        E: ExportKindFor + Send + Sync + Clone + 'static,
-    {
-        OtlpMetricPipeline {
-            aggregator_selector: self.aggregator_selector,
-            export_selector,
-            spawn: self.spawn,
-            interval: self.interval,
-            exporter_pipeline: self.exporter_pipeline,
-            resource: self.resource,
-            period: self.period,
-            timeout: self.timeout,
-        }
-    }
-
-    /// Build push controller.
-    pub fn build(self) -> Result<PushController> {
-        let exporter = self
-            .exporter_pipeline
-            .ok_or(Error::NoExporterBuilder)?
-            .build_metrics_exporter(self.export_selector.clone())?;
-
-        let mut builder = opentelemetry::sdk::metrics::controllers::push(
-            self.aggregator_selector,
-            self.export_selector,
-            exporter,
-            self.spawn,
-            self.interval,
-        );
-        if let Some(period) = self.period {
-            builder = builder.with_period(period);
-        }
-        if let Some(resource) = self.resource {
-            builder = builder.with_resource(resource);
-        }
-        if let Some(timeout) = self.timeout {
-            builder = builder.with_timeout(timeout)
-        }
-        let controller = builder.build();
-        global::set_meter_provider(controller.provider());
-        Ok(controller)
+#[cfg(feature = "grpc-tonic")]
+impl HasExportConfig for MetricExporterBuilder<TonicExporterBuilderSet> {
+    fn export_config(&mut self) -> &mut crate::ExportConfig {
+        &mut self.client.0.exporter_config
     }
 }
 
-enum ExportMsg {
-    #[cfg(feature = "tonic")]
-    Export(tonic::Request<ExportMetricsServiceRequest>),
-    Shutdown,
+#[cfg(any(feature = "http-proto", feature = "http-json"))]
+impl HasExportConfig for MetricExporterBuilder<HttpExporterBuilderSet> {
+    fn export_config(&mut self) -> &mut crate::ExportConfig {
+        &mut self.client.0.exporter_config
+    }
+}
+
+#[cfg(feature = "grpc-tonic")]
+impl HasTonicConfig for MetricExporterBuilder<TonicExporterBuilderSet> {
+    fn tonic_config(&mut self) -> &mut crate::TonicConfig {
+        &mut self.client.0.tonic_config
+    }
+}
+
+#[cfg(any(feature = "http-proto", feature = "http-json"))]
+impl HasHttpConfig for MetricExporterBuilder<HttpExporterBuilderSet> {
+    fn http_client_config(&mut self) -> &mut crate::exporter::http::HttpConfig {
+        &mut self.client.0.http_config
+    }
+}
+
+/// An interface for OTLP metrics clients
+#[async_trait]
+pub(crate) trait MetricsClient: fmt::Debug + Send + Sync + 'static {
+    async fn export(&self, metrics: &mut ResourceMetrics) -> MetricResult<()>;
+    fn shutdown(&self) -> ShutdownResult;
 }
 
 /// Export metrics in OTEL format.
-pub struct MetricsExporter {
-    #[cfg(feature = "tokio")]
-    sender: Arc<Mutex<tokio::sync::mpsc::Sender<ExportMsg>>>,
-    export_kind_selector: Arc<dyn ExportKindFor + Send + Sync>,
-    metadata: Option<tonic::metadata::MetadataMap>,
+pub struct MetricExporter {
+    client: Box<dyn MetricsClient>,
+    temporality: Temporality,
 }
 
-impl Debug for MetricsExporter {
+impl Debug for MetricExporter {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        #[cfg(feature = "tonic")]
-        f.debug_struct("OTLP Metric Exporter")
-            .field("grpc_client", &"tonic")
-            .finish()
+        f.debug_struct("MetricExporter").finish()
     }
 }
 
-impl ExportKindFor for MetricsExporter {
-    fn export_kind_for(&self, descriptor: &Descriptor) -> ExportKind {
-        self.export_kind_selector.export_kind_for(descriptor)
+#[async_trait]
+impl PushMetricExporter for MetricExporter {
+    async fn export(&self, metrics: &mut ResourceMetrics) -> MetricResult<()> {
+        self.client.export(metrics).await
     }
-}
 
-impl MetricsExporter {
-    /// Create a new OTLP metrics exporter.
-    #[cfg(feature = "tonic")]
-    pub fn new<T: ExportKindFor + Send + Sync + 'static>(
-        config: ExportConfig,
-        mut tonic_config: TonicConfig,
-        export_selector: T,
-    ) -> Result<MetricsExporter> {
-        let endpoint =
-            Channel::from_shared(config.endpoint).map_err::<crate::Error, _>(Into::into)?;
-
-        #[cfg(all(feature = "tls"))]
-        let channel = match tonic_config.tls_config {
-            Some(tls_config) => endpoint
-                .tls_config(tls_config)
-                .map_err::<crate::Error, _>(Into::into)?,
-            None => endpoint,
-        }
-        .timeout(config.timeout)
-        .connect_lazy()
-        .map_err::<crate::Error, _>(Into::into)?;
-
-        #[cfg(not(feature = "tls"))]
-        let channel = endpoint
-            .timeout(config.timeout)
-            .connect_lazy()
-            .map_err::<crate::Error, _>(Into::into)?;
-
-        let client = MetricsServiceClient::new(channel);
-
-        let (sender, mut receiver) = tokio::sync::mpsc::channel::<ExportMsg>(2);
-        tokio::spawn(Box::pin(async move {
-            while let Some(msg) = receiver.recv().await {
-                match msg {
-                    ExportMsg::Shutdown => {
-                        break;
-                    }
-                    ExportMsg::Export(req) => {
-                        let _ = client.to_owned().export(req).await;
-                    }
-                }
-            }
-        }));
-
-        Ok(MetricsExporter {
-            sender: Arc::new(Mutex::new(sender)),
-            export_kind_selector: Arc::new(export_selector),
-            metadata: tonic_config.metadata.take(),
-        })
-    }
-}
-
-impl Exporter for MetricsExporter {
-    fn export(&self, checkpoint_set: &mut dyn CheckpointSet) -> Result<()> {
-        let mut resource_metrics: Vec<CheckpointedMetrics> = Vec::default();
-        // transform the metrics into proto. Append the resource and instrumentation library information into it.
-        checkpoint_set.try_for_each(self.export_kind_selector.as_ref(), &mut |record| {
-            let metric_result = record_to_metric(record, self.export_kind_selector.as_ref());
-            match metric_result {
-                Ok(metrics) => {
-                    resource_metrics.push((
-                        record.resource().clone().into(),
-                        InstrumentationLibrary::new(
-                            record.descriptor().instrumentation_name(),
-                            record.descriptor().instrumentation_version(),
-                        ),
-                        metrics,
-                    ));
-                    Ok(())
-                }
-                Err(err) => Err(err),
-            }
-        })?;
-        let mut request = Request::new(sink(resource_metrics));
-        if let Some(metadata) = &self.metadata {
-            for key_and_value in metadata.iter() {
-                match key_and_value {
-                    KeyAndValueRef::Ascii(key, value) => {
-                        request.metadata_mut().append(key, value.to_owned())
-                    }
-                    KeyAndValueRef::Binary(key, value) => {
-                        request.metadata_mut().append_bin(key, value.to_owned())
-                    }
-                };
-            }
-        }
-        self.sender
-            .lock()
-            .map(|sender| {
-                let _ = sender.try_send(ExportMsg::Export(request));
-            })
-            .map_err(|_| Error::PoisonedLock("otlp metric exporter's tonic sender"))?;
+    async fn force_flush(&self) -> MetricResult<()> {
+        // this component is stateless
         Ok(())
     }
+
+    fn shutdown(&self) -> ShutdownResult {
+        self.client.shutdown()
+    }
+
+    fn temporality(&self) -> Temporality {
+        self.temporality
+    }
 }
 
-impl Drop for MetricsExporter {
-    fn drop(&mut self) {
-        let _sender_lock_guard = self.sender.lock().map(|sender| {
-            let _ = sender.try_send(ExportMsg::Shutdown);
-        });
+impl MetricExporter {
+    /// Obtain a builder to configure a [MetricExporter].
+    pub fn builder() -> MetricExporterBuilder<NoExporterBuilderSet> {
+        MetricExporterBuilder::default()
+    }
+
+    /// Create a new metrics exporter
+    pub(crate) fn new(client: impl MetricsClient, temporality: Temporality) -> MetricExporter {
+        MetricExporter {
+            client: Box::new(client),
+            temporality,
+        }
     }
 }

@@ -1,5 +1,125 @@
 # Changelog
 
+## vNext
+
+- Bump msrv to 1.75.0.
+- **Breaking** The `opentelemetry_zipkin::new_pipeline()` interface is now replaced with `opentelemetry_zipkin::ZipkinExporter::builder()`.
+  
+  Previous Signature:
+  ```rust
+  let tracer = opentelemetry_zipkin::new_pipeline()
+      .with_service_name("trace-demo")
+      .install_simple()?;
+  ```
+  Updated Signature:
+  ```rust
+  let exporter = ZipkinExporter::builder()
+      .with_service_name("trace-demo")
+      .build()?;
+  let provider = TracerProvider::builder()
+      .with_simple_exporter(exporter)
+      .build();
+  global::set_tracer_provider(provider.clone());
+
+  let tracer = global::tracer("zipkin-tracer");
+  ```
+
+## 0.27.0
+
+Released 2024-Nov-11
+
+- Update `opentelemetry` dependency version to 0.27
+- Update `opentelemetry_sdk` dependency version to 0.27
+- Update `opentelemetry-http` dependency version to 0.27
+- Update `opentelemetry-semantic-conventions` dependency version to 0.27
+
+- Bump MSRV to 1.70 [#2179](https://github.com/open-telemetry/opentelemetry-rust/pull/2179)
+
+## v0.26.0
+Released 2024-Sep-30
+
+- Update `opentelemetry` dependency version to 0.26
+- Update `opentelemetry_sdk` dependency version to 0.26
+- Update `opentelemetry-http` dependency version to 0.26
+- Update `opentelemetry-semantic-conventions` dependency version to 0.26
+
+## v0.25.0
+
+- Update `opentelemetry` dependency version to 0.25
+- Update `opentelemetry_sdk` dependency version to 0.25
+- Update `opentelemetry-http` dependency version to 0.25
+- Update `opentelemetry-semantic-conventions` dependency version to 0.25
+- Starting with this version, this crate will align with `opentelemetry` crate
+  on major,minor versions.
+
+## v0.22.0
+
+### Changed
+
+- Update `opentelemetry` dependency version to 0.24
+- Update `opentelemetry_sdk` dependency version to 0.24
+- Update `opentelemetry-http` dependency version to 0.13
+- Update `opentelemetry-semantic-conventions` dependency version to 0.16
+- Update `opentelemetry-http` (and with that to `http` v1 types) [#1674](https://github.com/open-telemetry/opentelemetry-rust/pull/1674)
+
+## v0.21.0
+
+### Changed
+
+- Update `opentelemetry` dependency version to 0.23
+- Update `opentelemetry_sdk` dependency version to 0.23
+- Update `opentelemetry-http` dependency version to 0.12
+- Update `opentelemetry-semantic-conventions` dependency version to 0.15
+
+## v0.20.0
+
+### Changed
+
+- **Breaking** Remove support for surf HTTP client [#1537](https://github.com/open-telemetry/opentelemetry-rust/pull/1537)
+
+## v0.19.0
+
+### Changed
+
+- Bump MSRV to 1.65 [#1318](https://github.com/open-telemetry/opentelemetry-rust/pull/1318)
+- Bump MSRV to 1.64 [#1203](https://github.com/open-telemetry/opentelemetry-rust/pull/1203)
+
+## v0.17.0
+
+### Changed
+
+- Update to opentelemetry v0.20.0
+
+## v0.17.0
+
+## Changed
+- Update to `opentelemetry` v0.19.
+- Update to `opentelemetry-http` v0.8.
+- Update to `opentelemetry-semantic-conventions` v0.11.
+- Bump MSRV to 1.57 [#953](https://github.com/open-telemetry/opentelemetry-rust/pull/953).
+- Update dependencies and bump MSRV to 1.60 [#969](https://github.com/open-telemetry/opentelemetry-rust/pull/969).
+
+## v0.16.0
+
+## Added
+
+- Add support for OTEL_EXPORTER_ZIPKIN_* variables. #718
+
+## Changed
+
+- Add defaults for timeouts to HTTP clients #718
+- Update to opentelemetry v0.18.0
+- Update to opentelemetry-http v0.7.0
+- Update to opentelemetry-semantic-conventions v0.10.0
+
+## v0.15.0
+
+### Changed
+
+- Update to opentelemetry v0.17.0
+- Update to opentelemetry-http v0.6.0
+- Update to opentelemetry-semantic-conventions v0.9.0
+
 ## v0.14.0
 
 ### Changed
@@ -108,5 +228,4 @@
 
 ### Added
 
-- Exporter to Zipkin collector through HTTP API 
-
+- Exporter to Zipkin collector through HTTP API

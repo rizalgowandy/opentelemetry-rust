@@ -10,3 +10,18 @@ coverage:
       default:
         target: auto
         threshold: 0.5%
+
+ignore:
+  - "opentelemetry/src/testing" # test harnesses
+  - "opentelemetry-otlp/src/proto" # auto generated files
+  - "opentelemetry-proto/src/proto" # auto generated files
+  # examples below
+  - "examples"
+  - "opentelemetry-zipkin/examples"
+  - "opentelemetry-otlp/examples"
+  - "opentelemetry-http/examples"
+  - "opentelemetry-prometheus/examples"
+  - "opentelemetry-appender-tracing/examples"
+  - "opentelemetry-appender-log/examples"
+  # stress test
+  - "stress"

@@ -1,3 +1,5 @@
+#[cfg(feature = "trace")]
+use crate::trace::context::SynchronizedSpan;
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -8,7 +10,6 @@ use std::sync::Arc;
 
 thread_local! {
     static CURRENT_CONTEXT: RefCell<Context> = RefCell::new(Context::default());
-    static DEFAULT_CONTEXT: Context = Context::default();
 }
 
 /// An execution-scoped collection of values.
@@ -75,6 +76,8 @@ thread_local! {
 /// ```
 #[derive(Clone, Default)]
 pub struct Context {
+    #[cfg(feature = "trace")]
+    pub(super) span: Option<Arc<SynchronizedSpan>>,
     entries: HashMap<TypeId, Arc<dyn Any + Sync + Send>, BuildHasherDefault<IdHasher>>,
 }
 
@@ -107,7 +110,19 @@ impl Context {
     /// do_work()
     /// ```
     pub fn current() -> Self {
-        get_current(|cx| cx.clone())
+        Context::map_current(|cx| cx.clone())
+    }
+
+    /// Applies a function to the current context returning its value.
+    ///
+    /// This can be used to build higher performing algebraic expressions for
+    /// optionally creating a new context without the overhead of cloning the
+    /// current one and dropping it.
+    ///
+    /// Note: This function will panic if you attempt to attach another context
+    /// while the current one is still borrowed.
+    pub fn map_current<T>(f: impl FnOnce(&Context) -> T) -> T {
+        CURRENT_CONTEXT.with(|cx| f(&cx.borrow()))
     }
 
     /// Returns a clone of the current thread's context with the given value.
@@ -169,7 +184,7 @@ impl Context {
     pub fn get<T: 'static>(&self) -> Option<&T> {
         self.entries
             .get(&TypeId::of::<T>())
-            .and_then(|rc| (&*rc).downcast_ref())
+            .and_then(|rc| rc.downcast_ref())
     }
 
     /// Returns a copy of the context with the new value included.
@@ -292,13 +307,39 @@ impl Context {
             _marker: PhantomData,
         }
     }
+
+    #[cfg(feature = "trace")]
+    pub(super) fn current_with_synchronized_span(value: SynchronizedSpan) -> Self {
+        Context {
+            span: Some(Arc::new(value)),
+            entries: Context::map_current(|cx| cx.entries.clone()),
+        }
+    }
+
+    #[cfg(feature = "trace")]
+    pub(super) fn with_synchronized_span(&self, value: SynchronizedSpan) -> Self {
+        Context {
+            span: Some(Arc::new(value)),
+            entries: self.entries.clone(),
+        }
+    }
 }
 
 impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Context")
-            .field("entries", &self.entries.len())
-            .finish()
+        let mut dbg = f.debug_struct("Context");
+        let mut entries = self.entries.len();
+        #[cfg(feature = "trace")]
+        {
+            if let Some(span) = &self.span {
+                dbg.field("span", &span.span_context());
+                entries += 1;
+            } else {
+                dbg.field("span", &"None");
+            }
+        }
+
+        dbg.field("entries", &entries).finish()
     }
 }
 
@@ -316,16 +357,6 @@ impl Drop for ContextGuard {
             let _ = CURRENT_CONTEXT.try_with(|current| current.replace(previous_cx));
         }
     }
-}
-
-/// Executes a closure with a reference to this thread's current context.
-///
-/// Note: This function will panic if you attempt to attach another context
-/// while the context is still borrowed.
-fn get_current<F: FnMut(&Context) -> T, T>(mut f: F) -> T {
-    CURRENT_CONTEXT
-        .try_with(|cx| f(&*cx.borrow()))
-        .unwrap_or_else(|_| DEFAULT_CONTEXT.with(|cx| f(&*cx)))
 }
 
 /// With TypeIds as keys, there's no need to hash them. They are already hashes
@@ -373,11 +404,23 @@ mod tests {
             let current = Context::current();
             assert_eq!(current.get(), Some(&ValueA("a")));
             assert_eq!(current.get(), Some(&ValueB(42)));
+
+            assert!(Context::map_current(|cx| {
+                assert_eq!(cx.get(), Some(&ValueA("a")));
+                assert_eq!(cx.get(), Some(&ValueB(42)));
+                true
+            }));
         }
 
         // Resets to only value `a` when inner guard is dropped
         let current = Context::current();
         assert_eq!(current.get(), Some(&ValueA("a")));
         assert_eq!(current.get::<ValueB>(), None);
+
+        assert!(Context::map_current(|cx| {
+            assert_eq!(cx.get(), Some(&ValueA("a")));
+            assert_eq!(cx.get::<ValueB>(), None);
+            true
+        }));
     }
 }

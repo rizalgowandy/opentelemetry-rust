@@ -1,5 +1,396 @@
 # Changelog
 
+## vNext
+
+- Bump msrv to 1.75.0.
+- **Breaking** `opentelemetry::global::shutdown_tracer_provider()` Removed from this crate, should now use `tracer_provider.shutdown()` see [#2369](https://github.com/open-telemetry/opentelemetry-rust/pull/2369) for a migration example.
+- *Breaking* Removed unused `opentelemetry::PropagationError` struct.
+
+## 0.27.1
+
+Released 2024-Nov-27
+
+## 0.27.0
+
+Released 2024-Nov-11
+
+- Bump MSRV to 1.70 [#2179](https://github.com/open-telemetry/opentelemetry-rust/pull/2179)
+- Add `LogRecord::set_trace_context`; an optional method conditional on the `trace` feature for setting trace context on a log record.
+- Removed unnecessary public methods named `as_any` from `AsyncInstrument` trait and the implementing instruments: `ObservableCounter`, `ObservableGauge`, and `ObservableUpDownCounter` [#2187](https://github.com/open-telemetry/opentelemetry-rust/pull/2187)
+- Introduced `SyncInstrument` trait to replace the individual synchronous instrument traits (`SyncCounter`, `SyncGauge`, `SyncHistogram`, `SyncUpDownCounter`) which are meant for SDK implementation. [#2207](https://github.com/open-telemetry/opentelemetry-rust/pull/2207)
+- Ensured that `observe` method on asynchronous instruments can only be called inside a callback. This was done by removing the implementation of `AsyncInstrument` trait for each of the asynchronous instruments. [#2210](https://github.com/open-telemetry/opentelemetry-rust/pull/2210)
+- Removed `PartialOrd` and `Ord` implementations for `KeyValue`. [#2215](https://github.com/open-telemetry/opentelemetry-rust/pull/2215)
+- **Breaking change for exporter authors:** Marked `KeyValue` related structs and enums as `non_exhaustive`. [#2228](https://github.com/open-telemetry/opentelemetry-rust/pull/2228)
+- **Breaking change for log exporter authors:** Marked `AnyValue` enum as `non_exhaustive`. [#2230](https://github.com/open-telemetry/opentelemetry-rust/pull/2230)
+- **Breaking change for Metrics users:** The `init` method used to create instruments has been renamed to `build`. Also, `try_init()` method is removed from instrument builders. The return types of `InstrumentProvider` trait methods modified to return the instrument struct, instead of `Result`. [#2227](https://github.com/open-telemetry/opentelemetry-rust/pull/2227)
+
+Before:
+```rust
+let counter = meter.u64_counter("my_counter").init();
+```
+
+Now:
+```rust
+let counter = meter.u64_counter("my_counter").build();
+```
+- **Breaking change**: [#2220](https://github.com/open-telemetry/opentelemetry-rust/pull/2220)
+  - Removed deprecated method `InstrumentationLibrary::new`
+  - Renamed `InstrumentationLibrary` to `InstrumentationScope`
+  - Renamed `InstrumentationLibraryBuilder` to `InstrumentationScopeBuilder`
+  - Removed deprecated methods `LoggerProvider::versioned_logger` and `TracerProvider::versioned_tracer`
+  - Removed methods `LoggerProvider::logger_builder`, `TracerProvider::tracer_builder` and `MeterProvider::versioned_meter`
+  - Replaced these methods with `LoggerProvider::logger_with_scope`, `TracerProvider::logger_with_scope`, `MeterProvider::meter_with_scope`
+  - Replaced `global::meter_with_version` with `global::meter_with_scope`
+  - Added `global::tracer_with_scope`
+  - Refer to PR description for migration guide.
+- **Breaking change**: replaced `InstrumentationScope` public attributes by getters [#2275](https://github.com/open-telemetry/opentelemetry-rust/pull/2275)  
+
+- **Breaking change**: [#2260](https://github.com/open-telemetry/opentelemetry-rust/pull/2260)
+  - Removed `global::set_error_handler` and `global::handle_error`. 
+  - `global::handle_error` usage inside the opentelemetry crates has been replaced with `global::otel_info`, `otel_warn`, `otel_debug` and `otel_error` macros based on the severity of the internal logs.
+  - The default behavior of `global::handle_error` was to log the error using `eprintln!`. With otel macros, the internal logs get emitted via `tracing` macros of matching severity. Users now need to configure a `tracing` layer/subscriber to capture these logs.
+  - Refer to PR description for migration guide. Also refer to [self-diagnostics](https://github.com/open-telemetry/opentelemetry-rust/tree/main/examples/self-diagnostics) example to learn how to view internal logs in stdout using `tracing::fmt` layer.
+
+- **Breaking change for exporter/processor authors:** [#2266](https://github.com/open-telemetry/opentelemetry-rust/pull/2266)
+   - Moved `ExportError` trait from `opentelemetry::ExportError` to `opentelemetry_sdk::export::ExportError`
+   - Created new trait `opentelemetry::trace::ExportError` for trace API. This would be eventually be consolidated with ExportError in the SDK.
+   - Moved `LogError` enum from `opentelemetry::logs::LogError` to `opentelemetry_sdk::logs::LogError`
+   - Moved `LogResult` type alias from `opentelemetry::logs::LogResult` to `opentelemetry_sdk::logs::LogResult`
+   - Moved `MetricError` enum from `opentelemetry::metrics::MetricError` to `opentelemetry_sdk::metrics::MetricError`
+   - Moved `MetricResult` type alias from `opentelemetry::metrics::MetricResult` to `opentelemetry_sdk::metrics::MetricResult`
+     These changes shouldn't directly affect the users of OpenTelemetry crate, as these constructs are used in SDK and Exporters. If you are an author of an sdk component/plug-in, like an exporter etc. please use these types from sdk. Refer [CHANGELOG.md](https://github.com/open-telemetry/opentelemetry-rust/blob/main/opentelemetry-sdk/CHANGELOG.md) for more details, under same version section.
+- **Breaking** [2291](https://github.com/open-telemetry/opentelemetry-rust/pull/2291) Rename `logs_level_enabled flag` to `spec_unstable_logs_enabled`. Please enable this updated flag if the feature is needed. This flag will be removed once the feature is stabilized in the specifications.
+
+## v0.26.0
+Released 2024-Sep-30
+
+- **BREAKING** Public API changes:
+  - **Removed**: `Key.bool()`, `Key.i64()`, `Key.f64()`, `Key.string()`, `Key.array()` [#2090](https://github.com/open-telemetry/opentelemetry-rust/issues/2090).     These APIs were redundant as they didn't offer any additional functionality. The existing `KeyValue::new()` API covers all the scenarios offered by these APIs.
+
+  - **Removed**: `ObjectSafeMeterProvider` and `GlobalMeterProvider` [#2112](https://github.com/open-telemetry/opentelemetry-rust/pull/2112). These APIs were unnecessary and were mainly meant for internal use.
+
+  - **Modified**: `MeterProvider.meter()` and `MeterProvider.versioned_meter()` argument types have been updated to `&'static str` instead of `impl Into<Cow<'static, str>>>` [#2112](https://github.com/open-telemetry/opentelemetry-rust/pull/2112). These APIs were modified to enforce the Meter `name`, `version`, and `schema_url` to be `&'static str`.
+
+  - **Renamed**: `NoopMeterCore` to `NoopMeter`
+
+- Added `with_boundaries` API to allow users to provide custom bounds for Histogram instruments. [#2135](https://github.com/open-telemetry/opentelemetry-rust/pull/2135)
+
+## v0.25.0
+
+- **BREAKING** [#1993](https://github.com/open-telemetry/opentelemetry-rust/pull/1993) Box complex types in AnyValue enum
+Before:
+```rust
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnyValue {
+    /// An integer value
+    Int(i64),
+    /// A double value
+    Double(f64),
+    /// A string value
+    String(StringValue),
+    /// A boolean value
+    Boolean(bool),
+    /// A byte array
+    Bytes(Vec<u8>),
+    /// An array of `Any` values
+    ListAny(Vec<AnyValue>),
+    /// A map of string keys to `Any` values, arbitrarily nested.
+    Map(HashMap<Key, AnyValue>),
+}
+```
+
+After:
+```rust
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnyValue {
+    /// An integer value
+    Int(i64),
+    /// A double value
+    Double(f64),
+    /// A string value
+    String(StringValue),
+    /// A boolean value
+    Boolean(bool),
+    /// A byte array
+    Bytes(Box<Vec<u8>>),
+    /// An array of `Any` values
+    ListAny(Box<Vec<AnyValue>>),
+    /// A map of string keys to `Any` values, arbitrarily nested.
+    Map(Box<HashMap<Key, AnyValue>>),
+}
+```
+So the custom log appenders should box these types while adding them in message body, or
+attribute values. Similarly, the custom exporters should dereference these complex type values
+before serializing.
+
+*Breaking* :
+[#2015](https://github.com/open-telemetry/opentelemetry-rust/pull/2015) Removed
+the ability to register callbacks for Observable instruments on Meter directly.
+If you were using `meter.register_callback` to provide the callback, provide
+them using `with_callback` method, while creating the Observable instrument
+itself.
+[1715](https://github.com/open-telemetry/opentelemetry-rust/pull/1715/files)
+shows the exact changes needed to make this migration. If you are starting new,
+refer to the
+[examples](https://github.com/open-telemetry/opentelemetry-rust/blob/main/examples/metrics-basic/src/main.rs)
+to learn how to provide Observable callbacks.
+
+## v0.24.0
+
+- Add "metrics", "logs" to default features. With this, default feature list is
+  "trace", "metrics" and "logs".
+- When "metrics" feature is enabled, `KeyValue` implements `PartialEq`, `Eq`,
+  `PartialOrder`, `Order`, `Hash`. This is meant to be used for metrics
+  aggregation purposes only.
+- Removed `Unit` struct for specifying Instrument units. Unit is treated as an
+  opaque string. Migration: Replace `.with_unit(Unit::new("myunit"))` with
+  `.with_unit("myunit")`.
+
+- [1869](https://github.com/open-telemetry/opentelemetry-rust/pull/1869) Introduced the `LogRecord::set_target()` method in the log bridge API. 
+This method allows appenders to set the target/component emitting the logs.
+
+## v0.23.0
+
+### Added
+
+- [#1640](https://github.com/open-telemetry/opentelemetry-rust/pull/1640) Add `PropagationError`
+- [#1701](https://github.com/open-telemetry/opentelemetry-rust/pull/1701) `Gauge` no longer requires `otel-unstable` feature flag, as OpenTelemetry specification for `Gauge` instrument is stable.
+
+### Removed
+
+- Remove `urlencoding` crate dependency. [#1613](https://github.com/open-telemetry/opentelemetry-rust/pull/1613)
+- Remove global providers for Logs [$1691](https://github.com/open-telemetry/opentelemetry-rust/pull/1691)
+    LoggerProviders are not meant for end users to get loggers from. It is only required for the log bridges.
+    Below global constructs for the logs are removed from API:
+        - opentelemetry::global::logger
+        - opentelemetry::global::set_logger_provider
+        - opentelemetry::global::shutdown_logger_provider
+        - opentelemetry::global::logger_provider
+        - opentelemetry::global::GlobalLoggerProvider
+        - opentelemetry::global::ObjectSafeLoggerProvider 
+    For creating appenders using Logging bridge API, refer to the opentelemetry-tracing-appender [example](https://github.com/open-telemetry/opentelemetry-rust/blob/main/opentelemetry-appender-tracing/examples/basic.rs)
+
+### Changed
+
+- **BREAKING** Moving LogRecord implementation to the SDK. [1702](https://github.com/open-telemetry/opentelemetry-rust/pull/1702).
+    - Relocated `LogRecord` struct to SDK.
+    - Introduced the `LogRecord` trait in the API for populating log records. This trait is implemented by the SDK.
+    This is the breaking change for the authors of Log Appenders. Refer to the [opentelemetry-appender-tracing](https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry-appender-tracing) for more details.
+
+- Deprecate `versioned_logger()` in favor of `logger_builder()` [1567](https://github.com/open-telemetry/opentelemetry-rust/pull/1567).
+
+Before:
+
+```rust
+let logger = provider.versioned_logger(
+    "my-logger-name",
+    Some(env!("CARGO_PKG_VERSION")),
+    Some("https://opentelemetry.io/schema/1.0.0"),
+    Some(vec![KeyValue::new("key", "value")]),
+);
+```
+
+After:
+
+```rust
+let logger = provider
+    .logger_builder("my-logger-name")
+    .with_version(env!("CARGO_PKG_VERSION"))
+    .with_schema_url("https://opentelemetry.io/schema/1.0.0")
+    .with_attributes(vec![KeyValue::new("key", "value")])
+    .build();
+```
+
+- Deprecate `versioned_tracer()` in favor of `tracer_builder()` [1567](https://github.com/open-telemetry/opentelemetry-rust/pull/1567).
+
+Before:
+
+```rust
+let tracer = provider.versioned_tracer(
+    "my-tracer-name",
+    Some(env!("CARGO_PKG_VERSION")),
+    Some("https://opentelemetry.io/schema/1.0.0"),
+    Some(vec![KeyValue::new("key", "value")]),
+);
+```
+
+After:
+
+```rust
+let tracer = provider
+    .tracer_builder("my-tracer-name")
+    .with_version(env!("CARGO_PKG_VERSION"))
+    .with_schema_url("https://opentelemetry.io/schema/1.0.0")
+    .with_attributes(vec![KeyValue::new("key", "value")])
+    .build();
+```
+
+## v0.22.0
+
+### Added
+
+- [#1410](https://github.com/open-telemetry/opentelemetry-rust/pull/1410) Add experimental synchronous gauge. This is behind the feature flag, and can be enabled by enabling the feature `otel_unstable` for opentelemetry crate.
+
+- [#1410](https://github.com/open-telemetry/opentelemetry-rust/pull/1410) Guidelines to add new unstable/experimental features.
+
+### Changed
+
+- Modified `AnyValue.Map` to be backed by `HashMap` instead of custom `OrderMap`,
+which internally used `IndexMap`. There was no requirement to maintain the order
+of entries, so moving from `IndexMap` to `HashMap` offers slight performance
+gains, and avoids `IndexMap` dependency. This affects `body` and `attributes` of
+`LogRecord`.
+[#1353](https://github.com/open-telemetry/opentelemetry-rust/pull/1353)
+- Add `TextMapCompositePropagator` [#1373](https://github.com/open-telemetry/opentelemetry-rust/pull/1373)
+- Turned off events for `NoopLogger` to save on operations
+  [#1455](https://github.com/open-telemetry/opentelemetry-rust/pull/1455)
+
+### Removed
+
+- Removed `OrderMap` type as there was no requirement to use this over regular
+`HashMap`.
+[#1353](https://github.com/open-telemetry/opentelemetry-rust/pull/1353)
+- Remove API for Creating Histograms with signed integers. [#1371](https://github.com/open-telemetry/opentelemetry-rust/pull/1371)
+- Remove `global::shutdown_meter_provider`, use `SdkMeterProvider::shutdown`
+  directly instead [#1412](https://github.com/open-telemetry/opentelemetry-rust/pull/1412).
+
+## [v0.21.0](https://github.com/open-telemetry/opentelemetry-rust/compare/v0.20.0...v0.21.0)
+
+This release should been seen as 1.0-rc4 following 1.0-rc3 in v0.20.0. Refer to CHANGELOG.md in individual creates for details on changes made in different creates.
+
+### Changed
+
+- Bump MSRV to 1.65 [#1318](https://github.com/open-telemetry/opentelemetry-rust/pull/1318)
+- Bump MSRV to 1.64 [#1203](https://github.com/open-telemetry/opentelemetry-rust/pull/1203)
+- `opentelemetry` crate now only carries the API types [#1186](https://github.com/open-telemetry/opentelemetry-rust/issues/1186). Use the `opentelemetry_sdk` crate for the SDK types.
+- `trace::noop::NoopSpan` no longer implements `Default` and instead exposes
+  a `const DEFAULT` value. [#1270](https://github.com/open-telemetry/opentelemetry-rust/pull/1270)
+- Updated crate documentation and examples.
+  [#1256](https://github.com/open-telemetry/opentelemetry-rust/issues/1256)
+- **Breaking** `SpanBuilder` attributes changed from `OrderMap<Key, Value>` to
+  `Vec<KeyValue>` and `with_attributes_map` method is removed from `SpanBuilder`.
+  This implies that OpenTelemetry API will no longer perform
+  de-dup of attribute Keys.
+  [#1293](https://github.com/open-telemetry/opentelemetry-rust/issues/1293).
+  Please share [feedback
+  here](https://github.com/open-telemetry/opentelemetry-rust/issues/1300), if
+  you are affected.
+
+## [v0.20.0](https://github.com/open-telemetry/opentelemetry-rust/compare/v0.19.0...v0.20.0)
+This release should been seen as 1.0-rc3 following 1.0-rc2 in v0.19.0. Refer to CHANGELOG.md in individual creates for details on changes made in different creates.
+
+### Added
+
+- Add `new` method to `BoxedTracer` #1009
+- Add js-sys as dependency for api crate when building wasm targets #1078
+- Create tracer using a shared instrumentation library #1129
+- Add `Context::map_current` #1140
+- Add unit/doc tests for metrics #1213
+- Add `opentelemetry::sdk::logs::config()` for parity with `opentelemetry::sdk::trace::config()` (#1197)
+
+### Changed
+
+- `OtelString::Owned` carries `Box<str>` instead of `String` #1096
+
+### Removed
+
+- Drop include_trace_context parameter from Logs API/SDK. [#1133](https://github.com/open-telemetry/opentelemetry-rust/issues/1133)
+- Synchronous instruments no longer accepts `Context` while reporting
+  measurements. [#1076](https://github.com/open-telemetry/opentelemetry-rust/pull/1076).
+- Fallible conversions from `futures-channel` error types to `LogError` and
+  `TraceError` removed.
+  [#1201](https://github.com/open-telemetry/opentelemetry-rust/issues/1201)
+
+### Fixed
+
+- Fix `SpanRef::set_attributes` mutability requirement. [#1038](https://github.com/open-telemetry/opentelemetry-rust/pull/1038)
+- Move OrderMap module to root of otel-api crate. [#1061](https://github.com/open-telemetry/opentelemetry-rust/pull/1061)
+- Use the browser-only js-sys workaround only when actually targeting a browser #1008
+
+## [v0.19.0](https://github.com/open-telemetry/opentelemetry-rust/compare/v0.18.0...v0.19.0)
+This release should been seen as 1.0-rc2 following 1.0-rc1 in v0.18.0. Refer to CHANGELOG.md in individual creates for details on changes made in different creates.
+
+### Added
+- Add `WithContext` to public api [#893](https://github.com/open-telemetry/opentelemetry-rust/pull/893).
+- Add support for instrumentation scope attributes [#1021](https://github.com/open-telemetry/opentelemetry-rust/pull/1021).
+
+### Changed
+- Implement `Display` on `Baggage` [#921](https://github.com/open-telemetry/opentelemetry-rust/pull/921).
+- Bump MSRV to 1.57 [#953](https://github.com/open-telemetry/opentelemetry-rust/pull/953).
+- Update dependencies and bump MSRV to 1.60 [#969](https://github.com/open-telemetry/opentelemetry-rust/pull/969).
+
+## [v0.18.0](https://github.com/open-telemetry/opentelemetry-rust/compare/v0.17.0...v0.18.0)
+
+This release is the first beta release of the `trace` API and SDK. If no other
+breaking changes are necessary, the next release will be 1.0. The `metrics` API
+and SDK are still unstable.
+
+### Added
+
+- Pull sampling probability from `OTEL_TRACES_SAMPLER_ARG` in default sdk config #737
+- Add `schema_url` to `Tracer` #743
+- Add `schema_url` to `Resource` #775
+- Add `Span::set_attributes` #638
+- Support concurrent exports #781
+- Add jaeger remote sampler #797
+- Allow Custom Samplers #833
+- Add `SpanExporter::force_flush` and default implementation #845
+
+### Changed
+
+- Deprecate metrics `ValueRecorder` in favor of `Histogram` #728
+- Move `IdGenerator` to SDK, rename to `RandomIdGenerator` #742
+- `meter_with_version` accepts optional parameter for `version` and `schema_url` #752
+- Unify `Event` and `Link` access patterns #757
+- move `SpanKind` display format impl to jaeger crate #758
+- make `TraceStateError` private #755
+- rename `Span::record_exception` to `Span::record_error` #756
+- Replace `StatusCode` and `message` with `Status` #760
+- Move `TracerProvider::force_flush` to SDK #658
+- Switch to static resource references #790
+- Allow O(1) get operations for `SpanBuilder::attributes` [breaking] #799
+- Allow ref counted keys and values #821
+- Bump MSRV from 1.49 to 1.55 #811
+- bump MSRV to 1.56 #866
+- Update metrics API and SDK for latest spec #819
+- Switch to `pin-project-lite` #830
+
+### Fixed
+
+- Update dashmap to avoid soundness hole #818
+- Perform sampling as explained in the specification #839
+- Remove internal message queue between exporter and exporting tasks #848
+- Fix span processor exporting unsampled spans #871
+
+### Removed
+
+- Remove `serialize` feature #738
+- Remove `StatusCode::as_str` #741
+- Remove `Tracer::with_span` #746
+
+## [v0.17.0](https://github.com/open-telemetry/opentelemetry-rust/compare/v0.16.0...v0.17.0)
+
+### Changed
+
+- Implement `Serialize` & `Deserialize` for `Sampler`, `SpanLimits` #622, #626
+- Allow `&'static str` and `string` in span methods #654
+- Allow `String` data in instrumentation library. #670
+- Remove `std::fmt::Debug` and `'static` requirements from `TracerProvider`,
+  `Tracer`, and `Span` #664
+- Remove unused `Tracer::invalid` method #683
+- Split `TracerProvider::tracer` and `TracerProvider::versioned_tracer` methods #682
+- Reduce dependency on `futures` crate #684
+- Switch to parent context references #687
+- Spec-compliant trace and span ids #689
+- Optimize span creation internals #693
+- Add instrumentation library to `ShouldSample` parameters #695
+
+### Fixed
+
+- Fix default resource detection for tracer provider #641
+- Detect `service.name` from `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` #662
+- Fix `TraceState::valid_key` crashes #665
+
 ## [v0.16.0](https://github.com/open-telemetry/opentelemetry-rust/compare/v0.15.0...v0.16.0)
 
 ### Changed

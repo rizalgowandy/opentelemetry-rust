@@ -1,8 +1,8 @@
 use opentelemetry::{
-    sdk::export::trace,
-    trace::{SpanKind, StatusCode},
+    trace::{SpanKind, Status},
     Key, KeyValue,
 };
+use opentelemetry_sdk::trace::SpanData;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
@@ -17,16 +17,6 @@ const INSTRUMENTATION_LIBRARY_VERSION: &str = "otel.library.version";
 const OTEL_ERROR_DESCRIPTION: &str = "error";
 const OTEL_STATUS_CODE: &str = "otel.status_code";
 
-/// Converts StatusCode to Option<&'static str>
-/// `Unset` status code is unused.
-fn from_statuscode_to_str(status_code: StatusCode) -> Option<&'static str> {
-    match status_code {
-        StatusCode::Ok => Some("OK"),
-        StatusCode::Unset => None,
-        StatusCode::Error => Some("ERROR"),
-    }
-}
-
 /// Converts `SpanKind` into an `Option<span::Kind>`
 fn into_zipkin_span_kind(kind: SpanKind) -> Option<span::Kind> {
     match kind {
@@ -38,48 +28,52 @@ fn into_zipkin_span_kind(kind: SpanKind) -> Option<span::Kind> {
     }
 }
 
-/// Converts a `trace::SpanData` to a `span::SpanData` for a given `ExporterConfig`, which can then
+/// Converts a `SpanData` to a `SpanData` for a given `ExporterConfig`, which can then
 /// be ingested into a Zipkin collector.
-pub(crate) fn into_zipkin_span(local_endpoint: Endpoint, span_data: trace::SpanData) -> span::Span {
+pub(crate) fn into_zipkin_span(local_endpoint: Endpoint, span_data: SpanData) -> span::Span {
     // see tests in create/exporter/model/span.rs
     let mut user_defined_span_kind = false;
     let mut tags = map_from_kvs(
         span_data
             .attributes
             .into_iter()
-            .map(|(k, v)| {
-                if k == Key::new("span.kind") {
+            .inspect(|kv| {
+                if kv.key == Key::new("span.kind") {
                     user_defined_span_kind = true;
                 }
-                KeyValue::new(k, v)
             })
             .chain(
                 [
                     (
                         INSTRUMENTATION_LIBRARY_NAME,
-                        Some(span_data.instrumentation_lib.name),
+                        Some(span_data.instrumentation_scope.name().to_owned()),
                     ),
                     (
                         INSTRUMENTATION_LIBRARY_VERSION,
-                        span_data.instrumentation_lib.version,
+                        span_data
+                            .instrumentation_scope
+                            .version()
+                            .map(ToOwned::to_owned),
                     ),
                 ]
-                .iter()
-                .filter_map(|(key, val)| {
-                    val.as_ref().map(|val| KeyValue::new(*key, val.to_owned()))
-                }),
+                .into_iter()
+                .filter_map(|(key, val)| val.map(|val| KeyValue::new(key, val))),
             )
             .filter(|kv| kv.key.as_str() != "error"),
     );
-    if let Some(status_code) = from_statuscode_to_str(span_data.status_code) {
-        if status_code == "ERROR" {
-            tags.insert(
-                OTEL_ERROR_DESCRIPTION.into(),
-                span_data.status_message.into_owned(),
-            );
+
+    match span_data.status {
+        Status::Unset => {}
+        Status::Ok => {
+            tags.insert(OTEL_STATUS_CODE.into(), "OK".into());
         }
-        tags.insert(OTEL_STATUS_CODE.into(), status_code.into());
-    }
+        Status::Error {
+            description: message,
+        } => {
+            tags.insert(OTEL_STATUS_CODE.into(), "ERROR".into());
+            tags.insert(OTEL_ERROR_DESCRIPTION.into(), message.into_owned());
+        }
+    };
 
     span::Span::builder()
         .trace_id(span_data.span_context.trace_id().to_string())

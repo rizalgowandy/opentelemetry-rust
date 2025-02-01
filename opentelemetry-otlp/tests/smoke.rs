@@ -1,14 +1,16 @@
-use futures::StreamExt;
-use opentelemetry::global::shutdown_tracer_provider;
+use futures_util::StreamExt;
+use opentelemetry::global;
 use opentelemetry::trace::{Span, SpanKind, Tracer};
-use opentelemetry_otlp::proto::collector::trace::v1::{
+use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
+use opentelemetry_proto::tonic::collector::trace::v1::{
     trace_service_server::{TraceService, TraceServiceServer},
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
-use opentelemetry_otlp::WithExportConfig;
 use std::{net::SocketAddr, sync::Mutex};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::TcpListenerStream;
+#[cfg(feature = "gzip-tonic")]
+use tonic::codec::CompressionEncoding;
 
 struct MockServer {
     tx: Mutex<mpsc::Sender<ExportTraceServiceRequest>>,
@@ -37,7 +39,9 @@ impl TraceService for MockServer {
             .unwrap()
             .try_send(request.into_inner())
             .expect("Channel full");
-        Ok(tonic::Response::new(ExportTraceServiceResponse {}))
+        Ok(tonic::Response::new(ExportTraceServiceResponse {
+            partial_success: None,
+        }))
     }
 }
 
@@ -55,6 +59,10 @@ async fn setup() -> (SocketAddr, mpsc::Receiver<ExportTraceServiceRequest>) {
     });
 
     let (req_tx, req_rx) = mpsc::channel(10);
+    #[cfg(feature = "gzip-tonic")]
+    let service = TraceServiceServer::new(MockServer::new(req_tx))
+        .accept_compressed(CompressionEncoding::Gzip);
+    #[cfg(not(feature = "gzip-tonic"))]
     let service = TraceServiceServer::new(MockServer::new(req_tx));
     tokio::task::spawn(async move {
         tonic::transport::Server::builder()
@@ -72,19 +80,32 @@ async fn smoke_tracer() {
     let (addr, mut req_rx) = setup().await;
 
     {
-        println!("Installing tracer...");
+        println!("Installing tracer provider...");
         let mut metadata = tonic::metadata::MetadataMap::new();
         metadata.insert("x-header-key", "header-value".parse().unwrap());
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(
-                opentelemetry_otlp::new_exporter()
-                    .tonic()
+        let tracer_provider = opentelemetry_sdk::trace::TracerProvider::builder()
+            .with_batch_exporter(
+                #[cfg(feature = "gzip-tonic")]
+                opentelemetry_otlp::SpanExporter::builder()
+                    .with_tonic()
+                    .with_compression(opentelemetry_otlp::Compression::Gzip)
                     .with_endpoint(format!("http://{}", addr))
-                    .with_metadata(metadata),
+                    .with_metadata(metadata)
+                    .build()
+                    .expect("gzip-tonic SpanExporter failed to build"),
+                #[cfg(not(feature = "gzip-tonic"))]
+                opentelemetry_otlp::SpanExporter::builder()
+                    .with_tonic()
+                    .with_endpoint(format!("http://{}", addr))
+                    .with_metadata(metadata)
+                    .build()
+                    .expect("NON gzip-tonic SpanExporter failed to build"),
             )
-            .install_batch(opentelemetry::runtime::Tokio)
-            .expect("failed to install");
+            .build();
+
+        global::set_tracer_provider(tracer_provider.clone());
+
+        let tracer = global::tracer("smoke");
 
         println!("Sending span...");
         let mut span = tracer
@@ -94,22 +115,24 @@ async fn smoke_tracer() {
         span.add_event("my-test-event", vec![]);
         span.end();
 
-        shutdown_tracer_provider();
+        tracer_provider
+            .shutdown()
+            .expect("tracer_provider should shutdown successfully");
     }
 
     println!("Waiting for request...");
     let req = req_rx.recv().await.expect("missing export request");
     let first_span = req
         .resource_spans
-        .get(0)
+        .first()
         .unwrap()
-        .instrumentation_library_spans
-        .get(0)
+        .scope_spans
+        .first()
         .unwrap()
         .spans
-        .get(0)
+        .first()
         .unwrap();
     assert_eq!("my-test-span", first_span.name);
-    let first_event = first_span.events.get(0).unwrap();
+    let first_event = first_span.events.first().unwrap();
     assert_eq!("my-test-event", first_event.name);
 }

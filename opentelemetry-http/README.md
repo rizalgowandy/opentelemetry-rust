@@ -1,35 +1,40 @@
+# OpenTelemetry HTTP
+
 ![OpenTelemetry — An observability framework for cloud-native software.][splash]
 
 [splash]: https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/main/assets/logo-text.png
 
-# OpenTelemetry HTTP
+This crate contains helper implementations for sending HTTP requests. Uses
+include propagating and extracting context over http, exporting telemetry,
+requesting sampling strategies.
 
-The Rust [OpenTelemetry](https://opentelemetry.io/) implementation.
-
-[![LICENSE](https://img.shields.io/crates/l/opentelemetry)](./LICENSE)
+[![Crates.io: opentelemetry-http](https://img.shields.io/crates/v/opentelemetry-http.svg)](https://crates.io/crates/opentelemetry-http)
+[![Documentation](https://docs.rs/opentelemetry-http/badge.svg)](https://docs.rs/opentelemetry-http)
+[![LICENSE](https://img.shields.io/crates/l/opentelemetry-http)](./LICENSE)
 [![GitHub Actions CI](https://github.com/open-telemetry/opentelemetry-rust/workflows/CI/badge.svg)](https://github.com/open-telemetry/opentelemetry-rust/actions?query=workflow%3ACI+branch%3Amain)
-[![Gitter chat](https://img.shields.io/badge/gitter-join%20chat%20%E2%86%92-brightgreen.svg)](https://gitter.im/open-telemetry/opentelemetry-rust)
+[![Slack](https://img.shields.io/badge/slack-@cncf/otel/rust-brightgreen.svg?logo=slack)](https://cloud-native.slack.com/archives/C03GDP0H023)
 
-[Website](https://opentelemetry.io/) |
-[Chat](https://gitter.im/open-telemetry/opentelemetry-rust) |
+## OpenTelemetry Overview
 
-## Overview
+OpenTelemetry is an Observability framework and toolkit designed to create and
+manage telemetry data such as traces, metrics, and logs. OpenTelemetry is
+vendor- and tool-agnostic, meaning that it can be used with a broad variety of
+Observability backends, including open source tools like [Jaeger] and
+[Prometheus], as well as commercial offerings.
 
-[`OpenTelemetry`] is a collection of tools, APIs, and SDKs used to instrument,
-generate, collect, and export telemetry data (metrics, logs, and traces) for
-analysis in order to understand your software's performance and behavior. This
-crate provides a HTTP client interface for use by trace exporters, as well as
-helper types to inject and extract key value pairs into/from HTTP headers.
+OpenTelemetry is *not* an observability backend like Jaeger, Prometheus, or other
+commercial vendors. OpenTelemetry is focused on the generation, collection,
+management, and export of telemetry. A major goal of OpenTelemetry is that you
+can easily instrument your applications or systems, no matter their language,
+infrastructure, or runtime environment. Crucially, the storage and visualization
+of telemetry is intentionally left to other tools.
 
-*Compiler support: [requires `rustc` 1.46+][msrv]*
-
-[`OpenTelemetry`]: https://crates.io/crates/opentelemetry
-[msrv]: #supported-rust-versions
+*[Supported Rust Versions](#supported-rust-versions)*
 
 ## Supported Rust Versions
 
 OpenTelemetry is built against the latest stable release. The minimum supported
-version is 1.46. The current OpenTelemetry version is not guaranteed to build
+version is 1.75.0. The current OpenTelemetry version is not guaranteed to build
 on Rust versions earlier than the minimum supported version.
 
 The current stable Rust compiler and the three most recent minor versions

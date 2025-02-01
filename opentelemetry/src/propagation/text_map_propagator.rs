@@ -1,7 +1,13 @@
-//! # Text Propagator
+//! # TextMapPropagator
 //!
-//! `TextMapPropagator` is a formatter to serialize and deserialize a value into a
-//! text format.
+//! [`TextMapPropagator`] performs the injection and extraction of a cross-cutting concern value as
+//! string key/values pairs into carriers that travel in-band across process boundaries.
+//!
+//! The carrier of propagated data on both the client (injector) and server (extractor) side is
+//! usually an HTTP request.
+//!
+//! In order to increase compatibility, the key/value pairs MUST only consist of US-ASCII characters
+//! that make up valid HTTP header fields as per RFC 7230.
 use crate::{
     propagation::{Extractor, Injector},
     Context,
@@ -18,7 +24,7 @@ pub trait TextMapPropagator: Debug {
     /// [`Context`]: crate::Context
     /// [`Injector`]: crate::propagation::Injector
     fn inject(&self, injector: &mut dyn Injector) {
-        self.inject_context(&Context::current(), injector)
+        Context::map_current(|cx| self.inject_context(cx, injector))
     }
 
     /// Properly encodes the values of the [`Context`] and injects them into the
@@ -35,7 +41,7 @@ pub trait TextMapPropagator: Debug {
     /// [`Context`]: crate::Context
     /// [`Injector`]: crate::propagation::Extractor
     fn extract(&self, extractor: &dyn Extractor) -> Context {
-        self.extract_with_context(&Context::current(), extractor)
+        Context::map_current(|cx| self.extract_with_context(cx, extractor))
     }
 
     /// Retrieves encoded data using the provided [`Extractor`]. If no data for this

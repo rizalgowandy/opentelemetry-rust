@@ -1,0 +1,27 @@
+name: integration tests
+env:
+  CI: true
+on:
+  pull_request:
+    types: [ labeled, synchronize, opened, reopened ]
+
+jobs:
+  integration_tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Free disk space
+        run: |
+          df -h
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          df -h
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: arduino/setup-protoc@v3
+      - name: Run integration tests
+        run: ./scripts/integration_tests.sh

@@ -1,18 +1,14 @@
-//! No-op trace impls
+//! No-op trace implementation
 //!
 //! This implementation is returned as the global tracer if no `Tracer`
 //! has been set. It is also useful for testing purposes as it is intended
 //! to have minimal resource utilization and runtime impact.
-use crate::trace::TraceResult;
 use crate::{
-    sdk::export::trace::{ExportResult, SpanData, SpanExporter},
-    trace,
-    trace::{SpanBuilder, TraceContextExt, TraceFlags, TraceState},
-    Context, KeyValue,
+    propagation::{text_map_propagator::FieldIter, Extractor, Injector, TextMapPropagator},
+    trace::{self, TraceContextExt as _},
+    Context, InstrumentationScope, KeyValue,
 };
-use async_trait::async_trait;
-use std::borrow::Cow;
-use std::time::SystemTime;
+use std::{borrow::Cow, time::SystemTime};
 
 /// A no-op instance of a `TracerProvider`.
 #[derive(Clone, Debug, Default)]
@@ -31,18 +27,8 @@ impl trace::TracerProvider for NoopTracerProvider {
     type Tracer = NoopTracer;
 
     /// Returns a new `NoopTracer` instance.
-    fn versioned_tracer(
-        &self,
-        _name: impl Into<Cow<'static, str>>,
-        _version: Option<&'static str>,
-        _schema_url: Option<&'static str>,
-    ) -> Self::Tracer {
+    fn tracer_with_scope(&self, _scope: InstrumentationScope) -> Self::Tracer {
         NoopTracer::new()
-    }
-
-    /// Return an empty `Vec` as there isn't any span processors in `NoopTracerProvider`
-    fn force_flush(&self) -> Vec<TraceResult<()>> {
-        Vec::new()
     }
 }
 
@@ -52,25 +38,11 @@ pub struct NoopSpan {
     span_context: trace::SpanContext,
 }
 
-impl Default for NoopSpan {
-    fn default() -> Self {
-        NoopSpan::new()
-    }
-}
-
 impl NoopSpan {
-    /// Creates a new `NoopSpan` instance.
-    pub fn new() -> Self {
-        NoopSpan {
-            span_context: trace::SpanContext::new(
-                trace::TraceId::INVALID,
-                trace::SpanId::INVALID,
-                TraceFlags::default(),
-                false,
-                TraceState::default(),
-            ),
-        }
-    }
+    /// The default `NoopSpan`, as a constant
+    pub const DEFAULT: NoopSpan = NoopSpan {
+        span_context: trace::SpanContext::NONE,
+    };
 }
 
 impl trace::Span for NoopSpan {
@@ -79,7 +51,7 @@ impl trace::Span for NoopSpan {
     where
         T: Into<Cow<'static, str>>,
     {
-        // Ignore
+        // Ignored
     }
 
     /// Ignores all events with timestamps
@@ -110,7 +82,7 @@ impl trace::Span for NoopSpan {
     }
 
     /// Ignores status
-    fn set_status(&mut self, _code: trace::StatusCode, _message: String) {
+    fn set_status(&mut self, _status: trace::Status) {
         // Ignored
     }
 
@@ -119,6 +91,10 @@ impl trace::Span for NoopSpan {
     where
         T: Into<Cow<'static, str>>,
     {
+        // Ignored
+    }
+
+    fn add_link(&mut self, _span_context: trace::SpanContext, _attributes: Vec<KeyValue>) {
         // Ignored
     }
 
@@ -144,58 +120,43 @@ impl NoopTracer {
 impl trace::Tracer for NoopTracer {
     type Span = NoopSpan;
 
-    /// Starts a new `NoopSpan` with a given context.
-    ///
-    /// If the context contains a valid span, it's span context is propagated.
-    fn start_with_context<T>(&self, name: T, parent_cx: &Context) -> Self::Span
-    where
-        T: Into<std::borrow::Cow<'static, str>>,
-    {
-        self.build_with_context(SpanBuilder::from_name(name), parent_cx)
-    }
-
-    /// Starts a `SpanBuilder`.
-    fn span_builder<T>(&self, name: T) -> trace::SpanBuilder
-    where
-        T: Into<std::borrow::Cow<'static, str>>,
-    {
-        trace::SpanBuilder::from_name(name)
-    }
-
     /// Builds a `NoopSpan` from a `SpanBuilder`.
     ///
     /// If the span builder or the context's current span contains a valid span context, it is
     /// propagated.
     fn build_with_context(&self, _builder: trace::SpanBuilder, parent_cx: &Context) -> Self::Span {
-        if parent_cx.has_active_span() {
-            NoopSpan {
-                span_context: parent_cx.span().span_context().clone(),
-            }
-        } else {
-            NoopSpan::new()
+        NoopSpan {
+            span_context: parent_cx.span().span_context().clone(),
         }
     }
 }
 
-/// A no-op instance of an [`SpanExporter`].
+/// A no-op instance of an [`TextMapPropagator`].
 ///
-/// [`SpanExporter`]: crate::sdk::export::trace::SpanExporter
+/// [`TextMapPropagator`]: crate::propagation::TextMapPropagator
 #[derive(Debug, Default)]
-pub struct NoopSpanExporter {
+pub struct NoopTextMapPropagator {
     _private: (),
 }
 
-impl NoopSpanExporter {
-    /// Create a new noop span exporter
+impl NoopTextMapPropagator {
+    /// Create a new noop text map propagator
     pub fn new() -> Self {
-        NoopSpanExporter { _private: () }
+        NoopTextMapPropagator { _private: () }
     }
 }
 
-#[async_trait]
-impl SpanExporter for NoopSpanExporter {
-    async fn export(&mut self, _batch: Vec<SpanData>) -> ExportResult {
-        Ok(())
+impl TextMapPropagator for NoopTextMapPropagator {
+    fn inject_context(&self, _cx: &Context, _injector: &mut dyn Injector) {
+        // ignored
+    }
+
+    fn extract_with_context(&self, _cx: &Context, _extractor: &dyn Extractor) -> Context {
+        Context::current()
+    }
+
+    fn fields(&self) -> FieldIter<'_> {
+        FieldIter::new(&[])
     }
 }
 
@@ -203,7 +164,7 @@ impl SpanExporter for NoopSpanExporter {
 mod tests {
     use super::*;
     use crate::testing::trace::TestSpan;
-    use crate::trace::{self, Span, Tracer};
+    use crate::trace::{Span, TraceState, Tracer};
 
     fn valid_span_context() -> trace::SpanContext {
         trace::SpanContext::new(
